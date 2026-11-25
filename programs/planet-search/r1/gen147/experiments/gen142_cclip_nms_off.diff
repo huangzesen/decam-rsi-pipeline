@@ -1,0 +1,67 @@
+--- history/gen140/submission/stackd/fstk.py	2026-11-08 17:44:28
++++ submission/stackd/fstk.py	2026-11-08 20:43:58
+@@ -96,6 +96,9 @@
+     # (window i covers 1" px i, i+1, centre i+0.5) instead of the stride-2 2" pool, so the nearest-neighbour sample is
+     # within +-0.25 canvas cell of the needed position instead of +-0.5.  Same per-cell noise distribution (2x2 max).
+     FINE = os.environ.get("TNO_FSTK_FINE", "0") == "1"
++    CCLIP = os.environ.get("TNO_FSTK_CCLIP", "0") != "0"   # gen 142: median-centre each 2" frame before the clip; measured WORSE on injection, OFF (= gen140)
++    NMS = int(os.environ.get("TNO_FSTK_NMS", "9") or 9) | 1      # gen 142: peak non-maximum-suppression window (9 = gen140)
++    Q8MIN = float(os.environ.get("TNO_FSTK_Q8MIN", "1.0" if CCLIP and not FINE else "1.5"))   # int8 scale floor (1.5 = gen140)
+     FINE_MB = float(os.environ.get("TNO_FSTK_FINE_MB", "6000"))   # precompute the stride-1 maps only under this size
+     smaps = smaps1 = None
+     if FINE:
+@@ -114,13 +117,26 @@
+         log(f"fstk fine: stride-1 2x2 max source {W1}x{H1}, {'precomputed' if smaps1 is not None else 'per frame'}")
+     else:
+         # 2" pooled, winsorized maps
+-        sm_ = []
++        sm_ = []; cmed_ = []
+         for i_ in range(0, N, 4):
+             a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
++            if CCLIP:
++                # gen 142 (TNO_FSTK_CCLIP): the 2x2 max-pooled noise sits at a median of ~+0.8, so the +-DCLIP winsorisation
++                # capped a frame's signal at only ~1.7 above the noise median (and +-RCLIP at ~2.2).  Remove each frame's
++                # median of covered pixels BEFORE the clip, so the clip is symmetric about the noise.
++                for j_ in range(a_.shape[0]):
++                    v_ = a_[j_, ::3, ::3]; v_ = v_[v_ != 0]
++                    if v_.numel() > 100:
++                        m_ = float(torch.median(v_))
++                        a_[j_] = torch.where(a_[j_] != 0, a_[j_] - m_, a_[j_])
++                        cmed_.append(round(m_, 2))
++                    del v_
+             if DCLIP > 0:
+                 a_ = a_.clamp_(-max(DCLIP, RCLIP) if RS else -DCLIP, max(DCLIP, RCLIP) if RS else DCLIP)
+             sm_.append(a_.half())
+         smaps = torch.cat(sm_, 0); del sm_
++        if CCLIP:
++            log(f"fstk cclip: frame medians removed before clip {cmed_[:24]}")
+         H2, W2 = smaps.shape[1:]
+     # distance grid (dgrid_deep step logic)
+     o = obs[sel]; tt = ts - tref
+@@ -346,7 +362,7 @@
+             # Optional int8 (TNO_FSTK_I8, default 1): scale so the sum of the co-adds' max |value| fits in int8.
+             amax = [float(Dm[k_].abs().max()) for k_ in range(K)]
+             qs = 127.0 / max(sum(amax), 1e-6)
+-            use8 = I8 and qs >= 1.5
++            use8 = I8 and qs >= Q8MIN
+             if use8:
+                 Dqf = torch.round(Dm.float().mul_(qs))
+                 # gen 129: round() can add up to 0.5 per co-add, so the rounded maxima may sum past 127 and the
+@@ -354,7 +370,7 @@
+                 if sum(float(Dqf[k_].abs().max()) for k_ in range(K)) > 127.0:
+                     del Dqf
+                     qs = (127.0 - 0.5 * K) / max(sum(amax), 1e-6)
+-                    use8 = qs >= 1.5
++                    use8 = qs >= Q8MIN
+                     Dqf = torch.round(Dm.float().mul_(qs)) if use8 else None
+             if use8:
+                 Dq = Dqf.to(torch.int8).reshape(K, -1); del Dqf
+@@ -441,7 +457,7 @@
+             # peaks
+             bs = best.reshape(Hc, WD)[:, :Wc].float() * qn
+             del best
+-            pk = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > PTH)
++            pk = (bs == F.max_pool2d(bs[None, None], NMS, 1, NMS // 2)[0, 0]) & (bs > PTH)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
+             fin_ = torch.isfinite(sc) & (sc < 1e3)   # gen 115: drop NaN/overflow peaks

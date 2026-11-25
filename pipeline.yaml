@@ -1,0 +1,600 @@
+# Registry of the nodes of the DECam RSI pipeline, as it ran (private snapshot, 2026-11-24).
+# Paths under implementation are relative to nodes/. hardcoded: counts of occurrences in the node's code, with examples
+# (measured by a scan of the copied files). Every node runs only where its site says; nothing here is portable yet.
+version: 1
+snapshot: 2026-11-24
+nodes:
+  - id: select-regions
+    stage: "1. archive pipeline"
+    purpose: "Choose the next ~5 % of DECam's sky to search: 3 x 3 deg cells scored by observing seasons, ecliptic latitude, Rubin coverage of where the bodies have moved, DES share and galactic plane; cells merged into regions of <= 6 cells."
+    implementation:
+      - "select-regions/archive5/select_regions.py (first 5 %)"
+      - "select-regions/ldt5/select_ldt.py (fourth 5 %, LDT-weighted)"
+      - "select-regions/conveyor/select_units.py (the conveyor's selector since 2026-11-20)"
+      - "select-regions/linker/footprint/*.py (archive inventory: exposures, cones, windows, seasons, costs)"
+    run:
+      - "python3 -I archive5/select_regions.py"
+      - "conveyor/unit.py new UID (copies the selector into units/UID/ and runs it)"
+    inputs:
+      - {what: "bulk manifests linker/data_real/decam_bulk/{ls6,vista}.tsv", format: "TSV md5, size, name, tag"}
+      - {what: "DECam exposure metadata (noirlab_decam_meta) and Rubin visits (rubin_visits)", format: "JSON/TSV, from linker/footprint/fetch_*.py"}
+      - {what: "--present: exposures already at NERSC or cached on Vista; --searched: exposures already searched", format: "stem lists"}
+    outputs:
+      - {file: "regions.json", format: "{asof, rule, frac, margin, cover_deg2, chosen_deg2, n_cells, unique_exposures, unique_tb, regions: [{id, label, ra, dec, deg2, cells, exposures, tb, first_year, last_year, seasons, ...}]}"}
+      - {file: "regions_exposures.json", format: "{rid: [exposure stems]}"}
+      - {file: "manifests/<rid>.tsv", format: "fetch.py manifest: md5, size, name, tag"}
+    config: "--frac (sky share, 0.05), --cover (DECam cover, 31,532 deg2), --margin (deg), --ldt weight|off, --ldt-from/--ldt-to/--ldt-min-h"
+    site: "Mac (local metadata only)"
+    hardcoded:
+      paths: {count: 7, distinct: 2, examples: ["~/anaconda3/bin/python", "/global/cfs/cdirs/cosmo/staging/decam"]}
+      hosts: {count: 5, distinct: 1, examples: ["astroarchive.noirlab.edu"]}
+      clusters: {count: 45, distinct: 6, examples: ["NERSC", "GB200", "A100", "GH200"]}
+    swap: "Another survey: rewrite the inventory (linker/footprint/fetch_*.py against that archive's API) and keep the cell score; another goal (e.g. a follow-up telescope): change the weights in the score function (the LDT weight is the worked example)."
+    downstream: ["conveyor"]
+  - id: download
+    stage: "1. archive pipeline"
+    purpose: "Bulk, resumable, md5-checked download of DECam InstCal triplets (image, weight, mask) from the NOIRLab Astro Data Archive, several copies per device sharing one manifest, with a device-wide stream budget and cool-down on throttling."
+    implementation:
+      - "download/fill/fetch.py"
+      - "download/fill/dl_watch.py (monitor and stream controller)"
+      - "download/fill/make_blank.py (what is still missing)"
+      - "download/fill/mac_fill.sh, nersc_fill.sbatch, vista_fill.sbatch"
+      - "download/bulk/*.py, *.sbatch (manifests, first bulk fetch)"
+      - "download/conveyor/nersc/unit_fetch.sbatch, download/ldt5/ldt5_fetch.sbatch (per-unit downloads)"
+    run:
+      - "python3 -I fetch.py MANIFEST.tsv DEST [--part k/N] [--streams 32] [--hours 47] [--max-tb 0]"
+      - "python3 -I fill/dl_watch.py loop 10"
+    inputs:
+      - {what: "manifest", format: "TSV: md5, size, name, tag per line, in download order (bulk/make_manifest.py, fill/make_blank.py)"}
+      - {what: "fetch_ctl.json (optional, beside fetch.py)", format: "JSON {total, pause_until, set, note}: device stream budget, written by dl_watch.py"}
+    outputs:
+      - {file: "DEST/img/<YYMMDD>/<name>.fits.fz", format: "DECam InstCal ooi/oow/ood files"}
+      - {file: "DEST/log/done_*.txt, fetch_*.log", format: "names finished (read by the relays); progress lines with MB/s, files, errors"}
+      - {file: "dl_watch.json", format: "per-cycle device rates and control events ('ctl')"}
+    config: "--streams, --part, --hours, --max-tb; fetch_ctl.json; STOP files (DEST/log/STOP)"
+    site: "NERSC xfer jobs, Lonestar6 job, Vista one gg node, the Mac (buffer on an external drive)"
+    hardcoded:
+      paths: {count: 57, distinct: 46, examples: ["$NERSC_SCRATCH/decam-fill/limits", "$NERSC_SCRATCH/dbt/env/bin/python", "$NERSC_SCRATCH/decam-fill", "$NERSC_SCRATCH/decam-fill/log/job-"]}
+      accounts: {count: 79, distinct: 5, examples: ["$NERSC_USER", "$TACC_USER", "$TACC_UID", "$NERSC_CPU_ACCOUNT"]}
+      hosts: {count: 10, distinct: 2, examples: ["astroarchive.noirlab.edu", "perlmutter.nersc.gov"]}
+      clusters: {count: 52, distinct: 5, examples: ["NERSC", "Vista", "regular", "Lonestar6"]}
+      ssh_sockets: {count: 4, distinct: 3, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$SSH_CM_DIR/ls6-$TACC_USER.sock", "$SSH_CM_DIR/vista-$TACC_USER.sock"]}
+    swap: "Another archive: replace the URL builder and md5 source in fetch.py (it is standard library only); the manifest format stays. Another cluster: copy fetch.py there and add a job script like nersc_fill.sbatch."
+    downstream: ["relay", "detect"]
+  - id: relay
+    stage: "1. archive pipeline"
+    purpose: "Move finished downloads between sites: Mac buffer -> NERSC (rsync over the SSH master), NERSC -> Vista and Lonestar6 -> Vista/NERSC (Globus tasks, checksum-verified, source deleted only after SUCCEEDED)."
+    implementation:
+      - "relay/fill/relay.py (NERSC -> Vista)"
+      - "relay/fill/relay_mac.py (Mac -> NERSC)"
+      - "relay/fill/relay_ls6.py, relay_units_ls6.py"
+      - "relay/fill/vista_known.py (what is on Vista)"
+    run:
+      - "python3 -I fill/relay.py loop 30"
+      - "python3 -I fill/relay_mac.py loop 2"
+    inputs:
+      - {what: "each download part's log/done_*.txt", format: "file names finished and md5-checked"}
+    outputs:
+      - {file: "relay/tasks/<task id>.json", format: "Globus task record (files carried, status)"}
+      - {file: "relay/relayed.txt", format: "names now on Vista"}
+      - {file: "relay*/relay.log", format: "one line per cycle"}
+    config: "loop minutes; STOP files in each relay folder; Globus endpoint ids and paths in the code"
+    site: "Mac (drives Globus CLI and rsync)"
+    hardcoded:
+      paths: {count: 22, distinct: 15, examples: ["$TACC_SCRATCH/decam-fill/img", "$SSH_CM_DIR/ls6-$TACC_USER.sock", "$NERSC_SCRATCH/decam-fill", "$SSH_CM_DIR/nersc-$NERSC_USER.sock"]}
+      accounts: {count: 33, distinct: 3, examples: ["$TACC_USER", "$NERSC_USER", "$TACC_UID"]}
+      hosts: {count: 4, distinct: 1, examples: ["perlmutter.nersc.gov"]}
+      clusters: {count: 74, distinct: 4, examples: ["NERSC", "Vista", "Lonestar6", "LS6"]}
+      ssh_sockets: {count: 5, distinct: 3, examples: ["$SSH_CM_DIR/ls6-$TACC_USER.sock", "$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$SSH_CM_DIR/vista-$TACC_USER.sock"]}
+    swap: "Another transfer service: replace the globus calls (submit, task status) in relay.py; the queue logic (done -> in flight -> relayed -> delete) stays."
+    downstream: ["detect"]
+  - id: detect
+    stage: "1. archive pipeline"
+    purpose: "Single-exposure detection: per CCD, block-median background, Gaussian matched filter at the CCD's FWHM, S/N >= 4.5 peaks with sub-pixel centres and RA/Dec from the CCD's TPV WCS. No stacking; static sources are kept."
+    implementation:
+      - "detect/archive5/tacc/detect.py"
+      - "detect/archive10/nersc/detect_pad.py (weight map 2 px larger than the image)"
+      - "detect/conveyor/nersc/unit_detect.sbatch, noweight_detect.py"
+      - "detect/archive5/tacc/job*.sbatch, detect/archive10/nersc/*.sbatch"
+      - "detect/ldt5/l5_detect*.sbatch, l5_farm.py"
+    run:
+      - "python3 -I detect.py IMG OUT [--workers 32] [--snr 4.5] [--watch] [--only STEM,...]"
+    inputs:
+      - {what: "IMG/<YYMMDD>/*_ooi_*, *_oow_*, *_ood_*", format: "DECam InstCal FITS (fpack)"}
+    outputs:
+      - {file: "OUT/<YYMMDD>/<stem>.npz", format: "columns ra, dec (deg), flux, ferr, snr, x, y, ccd, sharp, flag (1 near saturation, 2 masked, 4 edge); exposure values stem, expnum, mjd_mid, band, exptime, magzero, fwhm, airmass, ra0, dec0, wcscal"}
+    config: "--snr, --workers; mask handling (CP mask value 7 marks moving bodies: dropped as it ran)"
+    site: "NERSC CPU nodes (account $NERSC_CPU_ACCOUNT; GPU kept for the search), earlier TACC Vista/Lonestar6"
+    hardcoded:
+      paths: {count: 30, distinct: 6, examples: ["$NERSC_SCRATCH/archive10", "$NERSC_SCRATCH/dbt/env/bin/python", "$NERSC_SCRATCH/ldt5", "$NERSC_SCRATCH/units/slurm/detect-"]}
+      accounts: {count: 53, distinct: 5, examples: ["$NERSC_USER", "$NERSC_CPU_ACCOUNT", "$NERSC_GPU_ACCOUNT", "$TACC_USER"]}
+      hosts: {count: 5, distinct: 3, examples: ["astroarchive.noirlab.edu", "ls6.tacc.utexas.edu", "vista.tacc.utexas.edu"]}
+      clusters: {count: 32, distinct: 5, examples: ["NERSC", "regular", "debug", "A100"]}
+    swap: "Another detector (e.g. SExtractor or a CNN): any program that writes the same .npz columns per exposure plugs in; unit-build reads only those columns."
+    downstream: ["unit-build"]
+  - id: unit-build
+    stage: "1. archive pipeline"
+    purpose: "Turn one region's detection lists into a scenario (what a search program reads) and its labels (known bodies placed by JPL Horizons in every exposure, detections within 2\" labelled)."
+    implementation:
+      - "unit-build/decam-big-tno/bin/build_scen.py (+ build.sbatch, fix_pointing.py)"
+      - "unit-build/archive5/link/known_pos.py, unit-build/ldt5/known_pos.py"
+      - "unit-build/conveyor/nersc/unit_build.sbatch, unit_farm.py"
+      - "unit-build/decam-big-tno/harness/searchunit/{split_region,thin_region}.py"
+      - "unit-build/decam-big-tno/harness/{open_data,relabel_faint,body_props,body_props_par}.py (the r2 agents' open, labelled regions)"
+    run:
+      - "python3 -I known_pos.py REG_A,REG_B [--hmax 8]"
+      - "PAIRS=RID:SID,... sbatch build.sbatch (runs build_scen.py next to the data)"
+    inputs:
+      - {what: "detection lists", format: "detect's .npz per exposure"}
+      - {what: "known/<rid>.json", format: "{rid, bodies: [{name, pdes, H, first_obs, pos: {stem: [ra, dec]}}]}"}
+      - {what: "regions_exposures.json", format: "{rid: [stems]}"}
+    outputs:
+      - {file: "SCEN/<sid>/det_*.npy", format: "det_ra, det_dec (float64 deg), det_flux, det_ferr, det_snr, det_sharp, det_x, det_y (float32), det_ccd (int16), det_flag (uint8), det_exp (int32 row of the exposure table)"}
+      - {file: "SCEN/<sid>/exposures.json", format: "[{stem, mjd_mid, band, exptime, magzero, fwhm, airmass, ra0, dec0, obs_xyz}]"}
+      - {file: "SCEN/<sid>/region.json", format: "{centre, radius, seasons}"}
+      - {file: "TRUTH/<sid>.npz (sealed, never shipped)", format: "det_body, known table (name, H, weight), nights per body"}
+    config: "sid = 's' + sha1(rid)[:8]; --hmax 8; --planted N (0 as it ran)"
+    site: "NERSC CPU (build jobs, or a held interactive CPU node), earlier Vista gg; known positions on the Mac (JPL Horizons)"
+    hardcoded:
+      paths: {count: 28, distinct: 15, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$NERSC_SCRATCH/dbt/scen", "$TACC_SCRATCH/decam-fill/img", "$TACC_WORK/vista/archive5/env/bin/python"]}
+      accounts: {count: 48, distinct: 5, examples: ["$TACC_UID", "$TACC_USER", "$NERSC_USER", "$VISTA_ACCOUNT"]}
+      hosts: {count: 8, distinct: 4, examples: ["perlmutter.nersc.gov", "ssd.jpl.nasa.gov", "astroarchive.noirlab.edu", "$VM_HOST"]}
+      clusters: {count: 40, distinct: 5, examples: ["NERSC", "Vista", "A100", "debug"]}
+      ssh_sockets: {count: 4, distinct: 1, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock"]}
+    swap: "Another truth source (e.g. a different known-object catalogue): replace known_pos.py's SBDB + Horizons calls, keep its JSON; another detection format: adapt the reader in build_scen.py."
+    downstream: ["search-worker"]
+  - id: conveyor
+    stage: "1. archive pipeline"
+    purpose: "The Mac coordinator of continuous discovery: unit after unit (5 % of the sky each), select -> stage -> download -> detect -> build -> one search task per region, mirrored between NERSC and Vista, always with the hill climb's current best program; keeps worker jobs queued; retries failed regions."
+    implementation:
+      - "conveyor/conveyor/conveyor.py (the loop)"
+      - "conveyor/conveyor/units_side.py (per-unit stages, reloaded every tick)"
+      - "conveyor/conveyor/unit.py (new / known / stage a unit)"
+      - "conveyor/conveyor/{watchdog,site_scan}.py"
+      - "conveyor/conveyor/nersc/*.py"
+      - "conveyor/PIPELINE.md (the live map as it ran)"
+    run:
+      - "nohup python3 -I conveyor.py loop 3 >> loop.stdout 2>&1 &"
+    inputs:
+      - {what: "rsi/decam-big-tno/runs/r2/state.json", format: "the climb's best generation and its submission path"}
+      - {what: "units/<uid>/regions_search.json", format: "[{rid, sid, n_exp, ldt_h}]"}
+      - {what: "site scans", format: "claims, out/, timing/, worker files at each site"}
+    outputs:
+      - {file: "state.json", format: "per unit: stage, regions, tasks, claims"}
+      - {file: "ROOT/queue/<prio>_<unit>_<sid>", format: "one line: unit sid budget_s class"}
+      - {file: "ROOT/best/<gen>/sub, ROOT/best/CURRENT", format: "the program workers copy"}
+      - {file: "conveyor.log, alerts.log, health.json", format: "text / JSON"}
+    config: "KINDS (worker kinds and caps per site), budgets 1,800 s (7,200 s over 1,000 exposures), STOP file"
+    site: "Mac, driving NERSC and Vista over SSH masters and Globus"
+    hardcoded:
+      paths: {count: 34, distinct: 22, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$NERSC_SCRATCH/dbt/env/bin/python", "$NERSC_SCRATCH/decam-fill", "$NERSC_SCRATCH/units"]}
+      accounts: {count: 65, distinct: 5, examples: ["$NERSC_USER", "$TACC_USER", "$TACC_UID", "$NERSC_CPU_ACCOUNT"]}
+      hosts: {count: 15, distinct: 2, examples: ["perlmutter.nersc.gov", "vista.tacc.utexas.edu"]}
+      clusters: {count: 119, distinct: 8, examples: ["NERSC", "Vista", "debug", "regular"]}
+      ssh_sockets: {count: 10, distinct: 3, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$SSH_CM_DIR/vista-$TACC_USER.sock", "$SSH_CM_DIR/ls6-$TACC_USER.sock"]}
+    swap: "Another cluster: add a site entry (host, socket, user, scratch root, Python, worker sbatch) in conveyor.py's SITES and a worker job script; another program source: change where 'best' is read (one function)."
+    downstream: ["download", "search-worker"]
+  - id: search-worker
+    stage: "1. archive pipeline"
+    purpose: "Run the search program on one region per GPU: claim a task, copy the current best program, run it without network (unshare -rn where allowed) within its budget, write candidates and timings."
+    implementation:
+      - "search-worker/conveyor/worker.sh, nersc_worker.sbatch, vista_worker.sbatch"
+      - "search-worker/decam-big-tno/harness/search*/ (the campaigns before the conveyor: search38, search10a/b, searchldt5, searcha15)"
+    run:
+      - "bash worker.sh ROOT SCEN PY SITE LANES BIGOK WALL_S [IDLE_S] (inside an allocation)"
+    inputs:
+      - {what: "ROOT/queue/*", format: "unit sid budget_s class"}
+      - {what: "SCEN/<sid>/", format: "unit-build's scenario"}
+      - {what: "ROOT/best/CURRENT", format: "program folder"}
+    outputs:
+      - {file: "ROOT/out/<unit>/<sid>/candidates.json", format: "[{det: [row ids], p}] (the program's output; top 2,000 read)"}
+      - {file: "ROOT/timing/<unit>/<sid>", format: "'seconds rc gen site device isolation'"}
+      - {file: "ROOT/log/<unit>/<sid>.log", format: "program stdout/stderr"}
+    config: "lanes per node, big-region permission (host memory), wall, idle time"
+    site: "NERSC gpu_shared / interactive A100 nodes; Vista gh-dev, gh (GH200), gb (GB200)"
+    hardcoded:
+      paths: {count: 35, distinct: 16, examples: ["$NERSC_SCRATCH/dbt", "~/anaconda3/bin/python", "$NERSC_SCRATCH/archive10", "$NERSC_SCRATCH/archive5"]}
+      accounts: {count: 46, distinct: 6, examples: ["$NERSC_USER", "$NERSC_CPU_ACCOUNT", "$NERSC_GPU_ACCOUNT", "$TACC_UID"]}
+      clusters: {count: 88, distinct: 9, examples: ["NERSC", "regular", "A100", "Vista"]}
+    swap: "Another program: anything that runs as finder.py --scen DIR --out DIR --budget-s S and writes candidates.json; another cluster: a new sbatch that calls worker.sh with its Python and scratch paths."
+    downstream: ["grade"]
+  - id: grade
+    stage: "2. scoring"
+    purpose: "Score programs (climb rounds) and searched units: global ranking by p over all regions, K = 2 x findable known bodies scored; found = >= 80 % of a candidate's detections on one body and >= 5 of its nights; weight 2 for H <= 7, 1 for 7 < H <= 8. Also per-body feedback for the agents and the leads (confident unlabelled candidates)."
+    implementation:
+      - "grade/decam-big-tno/harness/grade.py"
+      - "grade/decam-big-tno/harness/oracle.py (perfect 1.0, low-p junk 1.0, high-p junk 0.0)"
+      - "grade/decam-big-tno/harness/nersc_grade.py + nersc/grade_node.sh (one interactive 4 x A100 node)"
+      - "grade/decam-big-tno/harness/vista/run_gb.sbatch (GB200, before 2026-11-13)"
+      - "grade/decam-big-tno/harness/gpu_logs.py"
+      - "grade/decam-big-tno/harness/searchunit/scoreunit.py (score a conveyor unit, send its leads)"
+    run:
+      - "python3 -I harness/scoreunit.py score|leads UNIT"
+      - "python3 -I harness/nersc_grade.py JOB TAG=SUBDIR=GRADEDIR [...] [--budget 3600]"
+    inputs:
+      - {what: "OUT/<sid>/candidates.json", format: "[{det, p}]"}
+      - {what: "timing", format: "seconds per region"}
+      - {what: "private/truth*/<sid>.npz", format: "labels (sealed)"}
+    outputs:
+      - {file: "GRADE/public.json", format: "{reward, gpu_hours, status, seconds}"}
+      - {file: "GRADE/grade.json (private)", format: "{reward, R_known, weights, gpu_hours, slots, candidates, cut_p, per_scenario, feedback, found, leads}"}
+      - {file: "GRADE/bodies.md (private)", format: "per findable body: found / below_cut / few_nights / mixed / in no candidate"}
+    config: "PER_SCEN 2,000; K = 2 x findable; found threshold 80 % and 5 nights; weights by H"
+    site: "programs run on NERSC (A100) or Vista (GB200); scoring on the Mac (numpy)"
+    hardcoded:
+      paths: {count: 9, distinct: 6, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock", "~/anaconda3/bin/python", "$NERSC_SCRATCH/dbt", "$TACC_SCRATCH/dbt/jobs/grade-"]}
+      accounts: {count: 16, distinct: 5, examples: ["$NERSC_USER", "$TACC_UID", "$TACC_USER", "$NERSC_GPU_ACCOUNT"]}
+      hosts: {count: 1, distinct: 1, examples: ["perlmutter.nersc.gov"]}
+      clusters: {count: 21, distinct: 7, examples: ["A100", "NERSC", "Vista", "interactive"]}
+      ssh_sockets: {count: 2, distinct: 1, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock"]}
+    swap: "Another grader: keep candidates.json and public.json; change the match rule or weights in grade.py; the climb reads only public.json plus the feedback fields it shows the agents."
+    downstream: ["climb", "lead-check"]
+  - id: rsi-loop
+    stage: "3. program writing (task 1)"
+    purpose: "Task 1 (planet-search): the first RSI loop. Each generation is one agent session that cannot score anything; it gets every earlier program, its notes and scalar reward, writes a finder for raw DECam images of one patch over days to weeks, and is graded on 10 sealed fields (A100, 900 s each). Its best program (r2 gen015) is the reference solver."
+    implementation:
+      - "rsi-loop/planet-search/rsi/harness/rsi_loop.py (outer loop, agent sandbox)"
+      - "rsi-loop/planet-search/rsi/harness/grade.py (sandboxed grader)"
+      - "rsi-loop/planet-search/rsi/harness/task/ (instruction, starter, reference linker, tools/check.py, graders.json)"
+      - "rsi-loop/planet-search/rsi/harness/ls6/ (Lonestar6 and NERSC graders, race.py)"
+      - "rsi-loop/planet-search/rsi/harness/programs_git.py, campaign_sync.py, gcp_agent.py"
+      - "rsi-loop/planet-search/rsi/bin/ (scenario selection, fetch, truth)"
+      - "rsi-loop/planet-search/rsi/baselines/kbmod/ (KBMOD baseline: 0.015)"
+      - "rsi-loop/planet-search/rsi/REFERENCE_SOLVER.md"
+    run:
+      - "python3 -I rsi_loop.py gen RUN [--n 1] [--model claude-opus-5-5] [--effort xhigh] [--hours 3]"
+    inputs:
+      - {what: "scenario folder", format: "exposures.csv (exp_id, image, weight, mask, mjd_mid, band, magzero, seeing, obs_x/y/z, ...), exposures/*.fits.fz, meta.json"}
+      - {what: "history/", format: "every earlier program, NOTES.md, reward.json (reward, per_scenario seconds)"}
+    outputs:
+      - {file: "OUT.json (program)", format: "{candidates: [{epoch_mjd, state [x,y,z,vx,vy,vz], p, mag}]} (<= 200 per scenario)"}
+      - {file: "runs/<run>/gens/<gen>/reward.json", format: "{reward, status, finder_seconds_total, graded_on, budget_s}"}
+      - {file: "programs.git", format: "one commit per generation; tags genNNN, record-<reward>-genNNN"}
+    config: "runs/<run>/config.json: eval (sealed sids), k_per_scen, cap_s, start, last_gen, agent_on (mac | gcp)"
+    site: "agents on the Mac (sandbox-exec) or the GCP VM; grading on NERSC A100 (also Lonestar6, Mac early on)"
+    hardcoded:
+      paths: {count: 23, distinct: 10, examples: ["~/anaconda3/bin/python", "$SSH_CM_DIR/ls6-$TACC_USER.sock", "$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$NERSC_SCRATCH/rsi-planet"]}
+      accounts: {count: 14, distinct: 5, examples: ["$TACC_USER", "$NERSC_USER", "$TACC_UID", "$LS6_ACCOUNT"]}
+      hosts: {count: 9, distinct: 8, examples: ["$VM_HOST", "ssd.jpl.nasa.gov", "astroarchive.noirlab.edu", "$VM_HOST"]}
+      clusters: {count: 110, distinct: 8, examples: ["A100", "LS6", "Lonestar6", "NERSC"]}
+      ssh_sockets: {count: 4, distinct: 2, examples: ["$SSH_CM_DIR/ls6-$TACC_USER.sock", "$SSH_CM_DIR/nersc-$NERSC_USER.sock"]}
+      models: {count: 5, distinct: 2, examples: ["Opus 5.5", "claude-opus-5-5"]}
+    swap: "Another model: --agent/--model/--effort; another sandbox: sandbox_profile() (macOS) or gcp_agent.py (container); another grader site: graders.json + ls6/*.py."
+    downstream: ["climb", "novelty"]
+  - id: climb
+    stage: "3. program writing (task 2)"
+    purpose: "Task 2 (decam-big-tno): the hill climb whose best program runs the archive search. Each round one or two agents (Claude Fable 5.2 via Claude Code; GPT 6 / 6.2 Astra via Codex) get every earlier program with its rewards, per-body feedback and run logs, write finder.py in a Harbor trial (CPU only, 2 h, no web), and the program is graded on 4 regions (one A100 each, 1,800 s). Rewards: recall and GPU-hours, never mixed."
+    implementation:
+      - "climb/decam-big-tno/harness/climb.py (run, status, starter)"
+      - "climb/decam-big-tno/harness/build_task_r2.py, eng_history.py"
+      - "climb/decam-big-tno/harness/task/, task_r2/ (instructions, starter, tools/check.py, subset.py)"
+      - "climb/decam-big-tno/harbor/decam-big-tno{,-r2}/ (the Harbor tasks: instruction, task.toml, Dockerfile, tests, solution)"
+      - "climb/decam-big-tno/progress/wait_climb.py"
+    run:
+      - "python3 -I harness/climb.py run --run r2 --target N --workers 1|2"
+      - "python3 -I harness/climb.py status --run r2"
+    inputs:
+      - {what: "runs/<run>/config.json", format: "truth, budget_s, vm_base, design, open, agent_override, prior, pairs_from, wait_grade"}
+      - {what: "history/ (built per round)", format: "SUMMARY.md, genNNN/{code, NOTES.md, public.json, grade.json, bodies.md, out/<sid>/candidates.json}, gpu_logs/, engineering/, prior_r1/"}
+      - {what: "/app/open (r2)", format: "all 23 regions' scenarios with labels (name, H, weight, nights), read-only"}
+    outputs:
+      - {file: "runs/<run>/state.json", format: "{target, best: {gen, reward, gpu_hours, hash, submission}, gens: {genNNN: {phase, status, reward, gpu_hours, agent, submission, hash, job}}}"}
+      - {file: "runs/<run>/gens/<gen>/{job-aK/, grade/}", format: "the Harbor job (artifact submission/) and the grade"}
+      - {file: "climb.log", format: "one line per event"}
+    config: "PAIR (models per round), AGENT_S 7,200 s, NO_BASE, BUDGET_S, NET and DESIG scans (network code or a designation scores 0), GO and STOP files"
+    site: "Mac (loop), trial host GCP VM (Harbor trials, Docker), NERSC (grading)"
+    hardcoded:
+      paths: {count: 8, distinct: 7, examples: ["~/anaconda3/bin/python", "$VM_WORK", "$SSH_CM_DIR/vista-$TACC_USER.sock", "$TACC_SCRATCH/dbt"]}
+      accounts: {count: 5, distinct: 3, examples: ["$TACC_USER", "$TACC_UID", "$VISTA_ACCOUNT"]}
+      hosts: {count: 5, distinct: 2, examples: ["$VM_HOST", "vista.tacc.utexas.edu"]}
+      clusters: {count: 29, distinct: 5, examples: ["Vista", "NERSC", "GH200", "A100"]}
+      ssh_sockets: {count: 1, distinct: 1, examples: ["$SSH_CM_DIR/vista-$TACC_USER.sock"]}
+      models: {count: 6, distinct: 4, examples: ["Astra", "claude-fable-5-2", "Fable 5.2", "openai/gpt-6-astra"]}
+    swap: "Another model: config agent_override {agent, model, name, effort} or PAIR; another grader site: nersc_grade.py is one module (Vista's run_gb.sbatch was the first); another task: build_task_r2.py + task_r2/instruction.md."
+    downstream: ["search-worker", "tailor"]
+  - id: tailor
+    stage: "3. program writing (task 2)"
+    purpose: "Port the climb's best program to one GPU device for least GPU time (one 2 h agent trial per device, CPU-only test)."
+    implementation:
+      - "tailor/decam-big-tno/tailor/tailor.py, stage.py"
+      - "tailor/decam-big-tno/tailor/targets.json (device facts), agents.json (pluggable agents)"
+      - "tailor/decam-big-tno/tailor/sites/tacc_grade.sbatch, ls6_env.sh (optional GPU grading)"
+    run:
+      - "python3 -I tailor/tailor.py port --target gb200-vista --agent astra [--dry]"
+    inputs:
+      - {what: "runs/r2/state.json", format: "best program"}
+      - {what: "targets.json", format: "per device: host, partition, GPU facts, BUDGET_S"}
+    outputs:
+      - {file: "tailor/ports/<target>/", format: "program + BUDGET_S.txt, PORT.md, port.json"}
+      - {file: "tailor/efficiency.json", format: "table"}
+    config: "--target, --agent (agents.json keys: astra, fable)"
+    site: "trial host (agent), optional Vista/Lonestar6 grading"
+    hardcoded:
+      paths: {count: 21, distinct: 13, examples: ["$TACC_SCRATCH/dbt/scen", "$TACC_SCRATCH/dbt/hw", "$NERSC_SCRATCH/dbt/scen", "$SSH_CM_DIR/vista-$TACC_USER.sock"]}
+      accounts: {count: 41, distinct: 6, examples: ["$TACC_USER", "$TACC_UID", "$NERSC_USER", "$NERSC_GPU_ACCOUNT"]}
+      hosts: {count: 3, distinct: 2, examples: ["vista.tacc.utexas.edu", "ls6.tacc.utexas.edu"]}
+      clusters: {count: 64, distinct: 10, examples: ["NERSC", "Lonestar6", "A100", "Vista"]}
+      ssh_sockets: {count: 3, distinct: 2, examples: ["$SSH_CM_DIR/vista-$TACC_USER.sock", "$SSH_CM_DIR/ls6-$TACC_USER.sock"]}
+      models: {count: 6, distinct: 4, examples: ["Astra", "openai/gpt-6.2-astra", "claude-fable-5-2", "Fable 5.2"]}
+    swap: "Another device: one entry in targets.json; another agent: one entry in agents.json."
+    downstream: []
+  - id: agents
+    stage: "cross-cutting"
+    purpose: "How agents were run. Program-writing agents: Harbor trials on the trial host (climb, tailor) or sandboxed Claude Code sessions on the Mac / GCP VM (rsi-loop). Analysis agents: headless Claude Code through the local model relay (launch.sh pattern: task file in, trace and a <= 25-line hand-back out)."
+    implementation:
+      - "agents/decam-big-tno/harness/agents/launch.sh"
+      - "agents/planet-search/rsi/candidates/allarch/doublecheck/launch.sh"
+      - "(agent launch code inside climb.py: launch(); rsi_loop.py: sandbox_profile(), run_agent(); tailor.py; gcp_agent.py)"
+    run:
+      - "bash launch.sh <pass>   (MODEL=claude-opus-5-5 EFFORT=xhigh by default)"
+    inputs:
+      - {what: "<pass>.task.md", format: "the brief"}
+    outputs:
+      - {file: "<pass>.trace.jsonl", format: "stream-json trace (not shipped)"}
+      - {file: "<pass>.handback.md", format: "<= 25 lines"}
+    config: "model and effort env vars; the relay at $RELAY_ADDR holds the keys ($RELAY_CLI reads them; never in this repo)"
+    site: "Mac; trial host = GCP VM with Docker and Harbor (run_trial.sh lives in a separate private repository, not included)"
+    hardcoded:
+      paths: {count: 4, distinct: 3, examples: ["$RELAY_CLI", "$ALE_HOME/rsi/decam-big-tno", "$ALE_HOME/planet-search/rsi/candidates/allarch"]}
+      models: {count: 5, distinct: 1, examples: ["claude-opus-5-5"]}
+    swap: "Another model or harness: climb's PAIR / agent_override and tailor's agents.json name a Harbor agent (claude-code | codex) and a model string; rsi_loop.py takes --agent/--model; launch.sh takes MODEL/EFFORT."
+    downstream: ["climb", "rsi-loop", "image-tests"]
+  - id: lead-check
+    stage: "4. vetting"
+    purpose: "Every lead of a graded round or searched unit goes to the novelty queue; then an in-data repeat test: fit one orbit, predict every other exposure of the region where it should be detectable, count detections there against a 30\"-shifted null. Plus the fixed-source test (is something at the same sky place at other epochs?)."
+    implementation:
+      - "lead-check/decam-big-tno/harness/leads.py"
+      - "lead-check/decam-big-tno/harness/lead_check.py"
+      - "lead-check/decam-big-tno/harness/static_test.py"
+      - "lead-check/decam-big-tno/harness/lead_check_rederive_v5.py"
+    run:
+      - "python3 -I harness/leads.py RUN GEN [--max 200]"
+      - "DBT_SITE=nersc python -I harness/lead_check.py RUN GEN"
+    inputs:
+      - {what: "grade.json leads", format: "[{sid, rank, p, det}]"}
+      - {what: "the region's scenario (remote read on NERSC/Vista)", format: "det_*.npy, exposures.json"}
+    outputs:
+      - {file: "novelty_queue/inbox/<id>.json", format: "{id, points: [[mjd_utc, ra, dec, sigma, site]], ...}"}
+      - {file: "runs/<run>/leads_sent.json", format: "ledger of sent leads with re-finds ('seen')"}
+      - {file: "runs/<run>/lead_check/<tag>.json", format: "[{id, region, a, e, i, r, H, D_km, expected, found, extra, extra_found, null_hits, rejected_*, hit_nights, verdict, check}]"}
+      - {file: "runs/<run>/static/<id>.json", format: "per arc row: sources at the same place in other-epoch exposures"}
+    config: "DBT_SITE (vista | nersc: where the scenarios are read), verdict thresholds in the code"
+    site: "Mac, reading scenarios on NERSC or Vista over the SSH master"
+    hardcoded:
+      paths: {count: 17, distinct: 10, examples: ["~/anaconda3/bin/python", "$SSH_CM_DIR/vista-$TACC_USER.sock", "$TACC_WORK/vista/dbt/env/bin/python", "$TACC_SCRATCH/dbt/scen"]}
+      accounts: {count: 20, distinct: 3, examples: ["$TACC_USER", "$NERSC_USER", "$TACC_UID"]}
+      hosts: {count: 4, distinct: 2, examples: ["vista.tacc.utexas.edu", "perlmutter.nersc.gov"]}
+      clusters: {count: 8, distinct: 2, examples: ["Vista", "NERSC"]}
+      ssh_sockets: {count: 4, distinct: 2, examples: ["$SSH_CM_DIR/vista-$TACC_USER.sock", "$SSH_CM_DIR/nersc-$NERSC_USER.sock"]}
+    swap: "Another site for scenarios: DBT_SITE and the host table in lead_check.py; another repeat test: replace check() and keep the result fields."
+    downstream: ["novelty", "arc-refit"]
+  - id: arc-refit
+    stage: "4. vetting"
+    purpose: "Extend a lead's arc season by season into the region's other years (2013-2026), predict where it is now, and refit without detections on fixed sources or lone far-season places."
+    implementation:
+      - "arc-refit/decam-big-tno/harness/arc_extend.py"
+      - "arc-refit/decam-big-tno/harness/arc_refit.py, arc_refit_nolone.py, arc_circfit.py"
+    run:
+      - "DBT_SITE=nersc python -I harness/arc_extend.py RUN ID..."
+      - "DBT_SITE=nersc python -I harness/arc_refit.py RUN ID_SUBSTRING ..."
+    inputs:
+      - {what: "lead_check result", format: "orbit fit"}
+      - {what: "static/<id>.json", format: "fixed-source test per row"}
+    outputs:
+      - {file: "runs/<run>/arc/<id>.json", format: "{id, n, nights, arc_days, arc_years, rms, a, e, i, r, rows, seasons, epoch_tdb, p, cov, now: [{date, ra, dec, sigma_arcsec}]} (positions: private)"}
+      - {file: "runs/<run>/arc/<id>.refit.json", format: "arc format + dropped [{row, mjd, band, reason}], base"}
+    config: "season gap 200 d, anchor rules and rms limits in the code"
+    site: "Mac + remote reads on NERSC/Vista"
+    hardcoded:
+      paths: {count: 5, distinct: 2, examples: ["~/anaconda3/bin/python", "$ALE_HOME/planet-search/rsi/candidates/allarch/doublecheck/singlenight.json"]}
+      clusters: {count: 2, distinct: 1, examples: ["Vista"]}
+    swap: "Another orbit fitter: lib-linker/orbit_fit.py is the one dependency (fit, predict, predict_sigma)."
+    downstream: ["image-tests", "candidate-db"]
+  - id: novelty
+    stage: "4. vetting"
+    purpose: "Is a lead already known? Everything catalogued that moves like it (MPCORB, the MPC's ITF of unlinked tracklets along the whole carried orbit, per-night SkyBoT of all classes, observations by the MPC get-obs API) gets one orbit fitted through both data sets (two-body screen, n-body test, shifted-copy power check): one body fits both, two do not."
+    implementation:
+      - "novelty/planet-search/rsi/candidates/novelty_check.py, novelty_watch.py, novelty_express.py"
+      - "novelty/planet-search/rsi/candidates/resolve_hand.py, screen_new.py, mpc_check.py, cand9_orbit.py (n-body fit)"
+      - "novelty/planet-search/rsi/candidates/allarch/{knownitf_check,itf_path_check,apply_hand,verdicts,nsc_path,conecache}.py"
+    run:
+      - "nohup python -I novelty_watch.py > novelty_queue/watcher.log 2>&1 &"
+      - "python -I novelty_check.py SPEC.json OUT.json"
+    inputs:
+      - {what: "SPEC.json", format: "{id, points: [[mjd_utc, ra, dec, sigma_arcsec, site]]} or {id, run, gen, sid, p, r}"}
+      - {what: "rsi/data/mpc/<date>/", format: "MPCORB and the ITF, refreshed daily by the watcher"}
+    outputs:
+      - {file: "novelty_queue/done/<id>.result.json", format: "{verdict, flagged, n_flagged, itf, itf_path_scanned, skybot, skybot_nights, nbody, tests, weak_links, untested, n_untested, seasons, rate, own, seconds, ...}; verdict NOT IN MPC FILES | KNOWN <designation> | KNOWN ITF <trk> | UNSURE: <why>"}
+      - {file: "novelty_queue/RESULTS.md", format: "one line per lead"}
+      - {file: "confirm_queue/inbox/", format: "leads passed on for confirmation"}
+    config: "radii, season gap 60 d, time budget TBUDGET, STOP file"
+    site: "Mac (single-threaded, one at a time); SkyBoT and MPC web services"
+    hardcoded:
+      paths: {count: 16, distinct: 8, examples: ["~/anaconda3/bin/python", "$ALE_HOME/planet-search/rsi", "$ALE_HOME/planet-search/linker", "$ALE_HOME/rsi/decam-big-tno/progress/objects/objects.json"]}
+      hosts: {count: 9, distinct: 3, examples: ["datalab.noirlab.edu", "minorplanetcenter.net", "<rubin-science-platform>"]}
+      clusters: {count: 2, distinct: 1, examples: ["NERSC"]}
+    swap: "Another catalogue: the readers for MPCORB/ITF/obs80 and the SkyBoT call are separate functions; the joint-fit test stays."
+    downstream: ["confirm", "candidate-db"]
+  - id: confirm
+    stage: "4. vetting"
+    purpose: "Confirmation in images the program never used: night places by comoving stacks, systematic ranging, public DECam exposures within 60 days fetched and stacked along the ranged orbits with fake-track controls, CFHT MegaCam on NERSC."
+    implementation:
+      - "confirm/planet-search/rsi/candidates/lead_confirm.py, confirm_watch.py"
+      - "confirm/planet-search/rsi/candidates/{confirm,confirm2,confirm_rest,refit,scan,suspects,cand5_f3pos,cfht_fetch}.py"
+    run:
+      - "python -I lead_confirm.py SPEC.json OUTDIR"
+      - "nohup python -I confirm_watch.py &"
+    inputs:
+      - {what: "SPEC.json (task 1 form)", format: "{id, run, gen, sid, p, r}"}
+      - {what: "archive images", format: "NOIRLab DECam, CADC CFHT (fetched per lead)"}
+    outputs:
+      - {file: "OUTDIR/{pos,range,list,...}.json, draws.npz", format: "stage outputs (resumable)"}
+      - {file: "verdict", format: "SEEN IN OTHER IMAGES | NOT SEEN | NO DECISIVE DATA"}
+    config: "stage thresholds in the docstring (stack S/N >= 5, controls recovered, static test)"
+    site: "Mac (DECam), NERSC CPU (CFHT)"
+    hardcoded:
+      paths: {count: 10, distinct: 3, examples: ["$ALE_HOME/planet-search/rsi", "$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$NERSC_SCRATCH/planet-cand"]}
+      accounts: {count: 4, distinct: 2, examples: ["$NERSC_USER", "$NERSC_CPU_ACCOUNT"]}
+      hosts: {count: 5, distinct: 5, examples: ["www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca", "minorplanetcenter.net", "perlmutter.nersc.gov", "ssd.jpl.nasa.gov"]}
+      clusters: {count: 13, distinct: 2, examples: ["NERSC", "debug"]}
+      ssh_sockets: {count: 1, distinct: 1, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock"]}
+    swap: "Another archive: a fetch + measure pair like cfht_fetch.py / confirm_rest.py; the verdict rule reads only the stack S/N per night."
+    downstream: ["candidate-db"]
+  - id: image-tests
+    stage: "4. vetting"
+    purpose: "The record of every image test of every candidate card (passes by analysis agents that measured a card at its predicted place in archive images the search never used: DECam, Pan-STARRS1, HSC, CFHT, ESO), merged into one friend-safe imagetests.json; plus image stamps and videos of a lead."
+    implementation:
+      - "image-tests/planet-search/rsi/candidates/allarch/doublecheck/imgrecord/imagetests_build.py (builder; per-card hand records removed)"
+      - "image-tests/.../imgrecord/{selftest,numcheck,peek}.py, imgrecord14/{check_record,fpcheck,stages14}.py (checks)"
+      - "image-tests/decam-big-tno/harness/{cutouts_remote,cutouts_render,lead_video}.py"
+    run:
+      - "~/anaconda3/bin/python -I imgrecord/imagetests_build.py [--fp]"
+    inputs:
+      - {what: "<pass>.json and <pass>.handback.md per analysis pass", format: "the pass's per-card measurements (not shipped)"}
+    outputs:
+      - {file: "imagetests.json", format: "{about, built, passes, cards: {C###: [{pass, verdict, evidence, nights_seen, nights_missed}]}, counts, disagreements, notes}"}
+    config: "PASSES (order), READER/WORDS (verdict mapping), the text rule (no MJD, coordinates, dates or file names in evidence)"
+    site: "Mac; passes ran as relay agents (launch.sh)"
+    hardcoded:
+      paths: {count: 8, distinct: 5, examples: ["~/anaconda3/bin/python", "$ALE_HOME/rsi/decam-big-tno", "$ALE_HOME/planet-search/linker", "$TACC_SCRATCH/dbt/scen"]}
+      accounts: {count: 4, distinct: 2, examples: ["$TACC_UID", "$TACC_USER"]}
+      hosts: {count: 2, distinct: 1, examples: ["astroarchive.noirlab.edu"]}
+      clusters: {count: 2, distinct: 2, examples: ["NERSC", "Vista"]}
+    swap: "Another archive pass: add its name to PASSES and a reader for its JSON; the verdict mapping (SEEN AGAIN / NOT SEEN / UNSURE / NO POWER) stays."
+    downstream: ["candidate-db"]
+  - id: candidate-db
+    stage: "5. records"
+    purpose: "One folder per promising body with permanent numbers (C###), every identity and every piece of evidence; refreshed by one script that also rebuilds the page and the Drive copy."
+    implementation:
+      - "candidate-db/decam-big-tno/progress/objects/gather.py (every promising body of every search, re-finds merged)"
+      - "candidate-db/decam-big-tno/candidates/build.py (registry and cards)"
+      - "candidate-db/decam-big-tno/candidates/refresh.sh (gather -> build -> observe -> page -> package)"
+    run:
+      - "zsh candidates/refresh.sh"
+    inputs:
+      - {what: "runs/<run>/{lead_check,arc,static,confirm}/", format: "vetting outputs"}
+      - {what: "novelty_queue/done/*.result.json", format: "novelty verdicts"}
+      - {what: "candidates_status.json (task 1)", format: "hand-kept status of planet-search bodies"}
+    outputs:
+      - {file: "objects.json", format: "every promising body: ids, run, region, rank, H, orbit summary, stage, verdict texts"}
+      - {file: "registry.json", format: "permanent numbers: lead id / label -> C###"}
+      - {file: "C###/card.json", format: "{cid, name, active, identities, orbit, stage, ladder, history, evidence, ...}"}
+      - {file: "C###/README.md, evidence/", format: "copies of the evidence"}
+    config: "stage rules (promising = filed or sent, or seen again + not in the MPC's files + not on fixed sources)"
+    site: "Mac"
+    hardcoded:
+      paths: {count: 2, distinct: 1, examples: ["~/anaconda3/bin/python"]}
+      hosts: {count: 1, distinct: 1, examples: ["<private-page-url>"]}
+    swap: "Another store (e.g. a database table): build.py is the only writer; its card.json fields are the schema."
+    downstream: ["observe", "package", "pages"]
+  - id: observe
+    stage: "5. records"
+    purpose: "Observability of every promising body for the next 14 nights at chosen sites (altitude/azimuth, dark hours, V, 1-sigma); no RA/Dec written."
+    implementation:
+      - "observe/decam-big-tno/progress/objects/observe.py"
+      - "observe/decam-big-tno/progress/objects/tonight.py"
+    run:
+      - "DBT_SITE=nersc ~/anaconda3/bin/python -I progress/objects/observe.py --sites G37"
+    inputs:
+      - {what: "runs/<run>/arc/<id>.json", format: "barycentric state p, cov, epoch_tdb"}
+    outputs:
+      - {file: "observe.json", format: "per site and night: Sun/Moon, dusk/dawn, per body alt/az every STEP min, hours above airmass 2, best altitude, V, sigma"}
+    config: "SITES table (code, name, lon, lat, height, UTC offset), STEP"
+    site: "Mac"
+    hardcoded:
+      paths: {count: 3, distinct: 2, examples: ["~/anaconda3/bin/python", "$ALE_HOME/rsi/decam-big-tno"]}
+      clusters: {count: 2, distinct: 1, examples: ["interactive"]}
+    swap: "Another site: one row in SITES."
+    downstream: []
+  - id: package
+    stage: "5. records"
+    purpose: "Private Drive copy of the candidate database, one folder per object (positions as ADES PSV, orbit, README); and the packaging of a whole hill-climb run with its traces."
+    implementation:
+      - "package/decam-big-tno/candidates/package.py"
+      - "package/decam-big-tno/harness/observer_batch.py (batches of candidates for an outside observer; helpers used by package.py)"
+      - "package/decam-big-tno/harness/drive_pack.py (+ README)"
+    run:
+      - "DBT_SITE=nersc ~/anaconda3/bin/python -I candidates/package.py"
+    inputs:
+      - {what: "candidates/C###/", format: "cards"}
+      - {what: "allarch/export_*.json", format: "other-archive positions"}
+    outputs:
+      - {file: "candidates/_drive/<CID>_<label>/", format: "README.md, positions.psv (ADES 2022), positions.json, orbit.json"}
+      - {file: "Drive folder", format: "rsync --checksum copy"}
+    config: "DRIVE path; PSV header (submitter, observatory W84)"
+    site: "Mac (Drive for Desktop folder)"
+    hardcoded:
+      paths: {count: 12, distinct: 10, examples: ["~/anaconda3/bin/python", "$DRIVE_FOLDER", "$ALE_HOME/rsi/decam-big-tno", "$ALE_HOME"]}
+      hosts: {count: 2, distinct: 2, examples: ["<private-page-url>", "$VM_HOST"]}
+      clusters: {count: 2, distinct: 1, examples: ["NERSC"]}
+    swap: "Another destination: change DRIVE and the final rsync."
+    downstream: []
+  - id: pages
+    stage: "5. records"
+    purpose: "Page builders (builders and templates only; no data): the hill-climb tracker, the Promising New Bodies catalogue, the DECam Data Movement dashboard, the decam-search site, and task 1's tracker."
+    implementation:
+      - "pages/decam-big-tno/progress/{build_score,docs}.py, index.html"
+      - "pages/decam-big-tno/progress/objects/{build_page.py, page.html}"
+      - "pages/planet-search/fill/dash/*.py, index.html"
+      - "pages/pages/team-site/decam/{build.py, loop.sh, page.html}"
+      - "pages/planet-search/rsi/progress/*.py"
+    run:
+      - "python3 -I progress/build_score.py"
+      - "python3 -I progress/objects/build_page.py"
+      - "python3 -I fill/dash/build.py"
+      - "decam/loop.sh"
+    inputs:
+      - {what: "state.json, grade.json, objects.json, observe.json, status of transfers", format: "JSON"}
+    outputs:
+      - {file: "score.json, index.html, status.json, public/decam-search/", format: "page data and HTML"}
+    config: "forbidden-word lists (client names, names, Rubin DP2 text) stop a build"
+    site: "Mac; published to claude.ai artifacts and a Cloudflare site"
+    hardcoded:
+      paths: {count: 23, distinct: 17, examples: ["$PAGE_PUBLISHER", "$PAGES_OUT/traces", "$PAGES_OUT/index.html", "$PAGES_OUT/plateau/index.html"]}
+      accounts: {count: 10, distinct: 3, examples: ["$NERSC_USER", "$TACC_USER", "$NERSC_CPU_ACCOUNT"]}
+      hosts: {count: 12, distinct: 7, examples: ["<team-site-url>", "<private-page-url>", "<private-page-url>", "<private-page-url>"]}
+      clusters: {count: 177, distinct: 8, examples: ["NERSC", "Vista", "A100", "Lonestar6"]}
+      ssh_sockets: {count: 2, distinct: 2, examples: ["$SSH_CM_DIR/nersc-$NERSC_USER.sock", "$SSH_CM_DIR/vista-$TACC_USER.sock"]}
+      models: {count: 33, distinct: 5, examples: ["Astra", "Fable 5.2", "claude-opus-5-5", "Opus 5.5"]}
+    swap: "Another host: the builders write static HTML/JSON; only the publish step is host-specific."
+    downstream: []
+  - id: archive-plans
+    stage: "1. archive pipeline (planned)"
+    purpose: "Kits for searching the whole archive in task-sized pieces (222 survey-class groups, 3,761 slices) with the reference solver; made and piloted, not the live path (the conveyor replaced them)."
+    implementation:
+      - "archive-plans/planet-search/groups/kit/{make_groups,run_group,score_group,known_bodies}.py, remote_run.sh, sites/*.sbatch, WORKER_BRIEF.md"
+      - "archive-plans/planet-search/slices/kit/{make_slices,slice_run,slice_score,common}.py"
+    run:
+      - "python3 -I make_slices.py ..."
+      - "bash slices/<id>/run.sh"
+    inputs:
+      - {what: "groups/windows from linker/footprint", format: "JSON"}
+    outputs:
+      - {file: "slices/<id>/", format: "self-contained folder: run.sh, program, settings, known.json"}
+    config: "A100 cost model (0.2276 h per window + 0.0209 h per exposure)"
+    site: "NERSC / Lonestar6 (planned)"
+    hardcoded:
+      paths: {count: 11, distinct: 5, examples: ["~/anaconda3/bin/python", "$NERSC_SCRATCH/rsi-planet/env/bin/python", "$NERSC_SCRATCH/decam-groups", "/global/cfs/cdirs/cosmo/staging/decam/"]}
+      accounts: {count: 13, distinct: 5, examples: ["$NERSC_USER", "$NERSC_GPU_ACCOUNT", "$LS6_ACCOUNT", "$TACC_UID"]}
+      hosts: {count: 6, distinct: 3, examples: ["astroarchive.noirlab.edu", "ssd.jpl.nasa.gov", "perlmutter.nersc.gov"]}
+      clusters: {count: 21, distinct: 4, examples: ["A100", "Perlmutter", "regular", "Lonestar6"]}
+    swap: "Another solver: the program folder of a slice."
+    downstream: []
+  - id: lib-linker
+    stage: "library"
+    purpose: "Shared orbit and linking code: two-body orbits and frames, the barycentric orbit fitter used by every vetting step, the HelioLinC-style CPU/GPU linkers (starter of both tasks), NSC DR2 fetch."
+    implementation:
+      - "lib-linker/planet-search/linker/{orbits,orbit_fit,ed138,link_cpu,link_gpu,pairs_triton,nsc_fetch}.py"
+    run:
+      - "imported"
+    inputs:
+      - {what: "detections / places", format: "numpy arrays"}
+    outputs:
+      - {file: "orbits, links", format: "Python objects"}
+    config: "none"
+    site: "anywhere (numpy, scipy, astropy; torch/triton for link_gpu)"
+    hardcoded:
+      hosts: {count: 1, distinct: 1, examples: ["datalab.noirlab.edu"]}
+      clusters: {count: 1, distinct: 1, examples: ["GH200"]}
+    swap: "Another orbit fitter (e.g. find_orb, layup): wrap it to the fit/predict/predict_sigma functions the vetting code calls."
+    downstream: []

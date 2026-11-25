@@ -1,0 +1,97 @@
+--- workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ tmp/armB/stackd/finder.py	2026-11-05 13:15:39
+@@ -1597,6 +1597,46 @@
+                 import traceback
+                 traceback.print_exc()
+                 log("bright-pair failed:", repr(ex)[:300])
++        # gen 91 (TNO_BGSUB, default 0 = gen085): local-background-subtracted re-order.  The weighted along-track
++        # stack of 9x9 px (1"/px) map patches is formed for every output candidate; its local background = median of
++        # the stack at radius >= 2.5 px.  A real moving point source sits on ~0 background; the junk that outranks
++        # real bodies sits on extended positive emission (halos/diffuse residual, median ring ~1.5-5 sigma on inj7).
++        # Key = along-track weighted S/N - max(background, 0).  Re-ORDER only: candidates keep the sorted p values.
++        if os.environ.get("TNO_BGSUB", "0") != "0" and len(cands) >= 2:
++            try:
++                tb0 = time.time()
++                cs_ = sorted(cands, key=lambda c: -c["p"])
++                Sb_ = np.array([c_["state"] for c_ in cs_], float).reshape(-1, 6)
++                ok_ep = np.array([abs(float(c_.get("epoch_mjd", t_ep)) - t_ep) < 1e-6 for c_ in cs_])
++                u_ = orbit.predict_dirs_b(Sb_, t_ep, t, obs)
++                q_ = u_ @ TF0.T
++                ix_ = np.rint((q_[..., 0] / q_[..., 2] - x0) / PIX).astype(np.int64)
++                iy_ = np.rint((q_[..., 1] / q_[..., 2] - y0) / PIX).astype(np.int64)
++                HB_ = 4
++                oy_, ox_ = np.mgrid[-HB_:HB_ + 1, -HB_:HB_ + 1]
++                ringm_ = np.hypot(ox_, oy_).ravel() >= 2.5
++                xx_ = ix_[..., None] + ox_.ravel()[None, None]; yy_ = iy_[..., None] + oy_.ravel()[None, None]
++                okp_ = (xx_ >= 0) & (xx_ < W) & (yy_ >= 0) & (yy_ < H)
++                lin_ = (np.where(okp_, yy_ * W + xx_, 0) + (np.arange(N) * (H * W))[None, :, None])
++                lt_ = torch.from_numpy(lin_.ravel()).to(dev)
++                pv_ = maps.reshape(-1)[lt_].float().reshape(lin_.shape).cpu().numpy()
++                pc_ = cov.reshape(-1)[lt_].cpu().numpy().reshape(lin_.shape) & okp_
++                pv_ = np.where(pc_, pv_, 0.0).astype(np.float64)
++                stk_ = (pv_ * wf[None, :, None]).sum(1) / np.sqrt(np.maximum((pc_ * wf2[None, :, None]).sum(1), 1e-3))
++                bg_ = np.median(stk_[:, ringm_], 1)
++                vb_, cb_ = score_states(Sb_)
++                tb_ = (vb_ * wf[None]).sum(1) / np.sqrt(np.maximum((cb_ * wf2[None]).sum(1), 1e-3))
++                key_ = np.where(ok_ep, tb_ - np.maximum(bg_, 0.0), tb_)
++                pvs_ = [float(c_["p"]) for c_ in cs_]
++                new_ = np.argsort(-key_, kind="stable")
++                cands = [dict(cs_[j], p=pvs_[k]) for k, j in enumerate(new_)]
++                write_out(a.out, cands)
++                log(f"bgsub: {len(cands)} re-ordered in {time.time() - tb0:.1f}s; old top-25 bg median "
++                    f"{np.median(bg_[:25]):.2f}; new top-25 from old ranks {sorted(int(j) for j in new_[:25])}")
++            except Exception as ex:
++                import traceback
++                traceback.print_exc()
++                log("bgsub failed:", repr(ex)[:300])
+         try:
+             rk_ = np.array(rkd)
+             log(f"refined by kind (linker/night/window/deep): {[int((rk_ == k_).sum()) for k_ in range(4)]}; "
+@@ -1616,8 +1656,47 @@
+         except Exception as ex:
+             log("nseed2 stats failed:", repr(ex)[:200])
+         log(f"seed-score median {np.median(rsc):.2f}, max {np.max(rsc):.2f}; refined {len(refined)}; output {len(cands)}; top p {[round(c['p'], 3) for c in sorted(cands, key=lambda c: -c['p'])[:8]]}")
++        FXD = os.environ.get("TNO_FEAT_DUMP")   # gen 91 diagnostics: per-exposure map patches of the final candidates + null
++        if FXD:
++            try:
++                fin_ = sorted(cands, key=lambda c: -c["p"])[:200]
++                Sf_ = np.array([c_["state"] for c_ in fin_], float).reshape(-1, 6)
++                nmk_ = np.array(rkd) == 2
++                Sn_ = R[nmk_] if nmk_.sum() >= 30 else R[np.array(rkd) >= 2]
++                Sn_ = Sn_[np.random.default_rng(11).permutation(len(Sn_))[:600]]
++                HP_ = 4
+ 
++                def patches_(S_):
++                    u_ = orbit.predict_dirs_b(S_, t_ep, t, obs)
++                    q_ = u_ @ TF0.T
++                    fx_ = (q_[..., 0] / q_[..., 2] - x0) / PIX; fy_ = (q_[..., 1] / q_[..., 2] - y0) / PIX
++                    ix_ = np.rint(fx_).astype(np.int64); iy_ = np.rint(fy_).astype(np.int64)
++                    P_ = np.full(ix_.shape + (2 * HP_ + 1, 2 * HP_ + 1), np.nan, np.float32)
++                    for e_ in range(N):
++                        me_ = maps[e_].float().cpu().numpy(); ce_ = cov[e_].cpu().numpy()
++                        for dy_ in range(-HP_, HP_ + 1):
++                            for dx_ in range(-HP_, HP_ + 1):
++                                xx_ = ix_[:, e_] + dx_; yy_ = iy_[:, e_] + dy_
++                                ok_ = (xx_ >= 0) & (xx_ < W) & (yy_ >= 0) & (yy_ < H)
++                                xc_ = np.clip(xx_, 0, W - 1); yc_ = np.clip(yy_, 0, H - 1)
++                                val_ = np.where(ok_ & ce_[yc_, xc_], me_[yc_, xc_], np.nan)
++                                P_[:, e_, dy_ + HP_, dx_ + HP_] = val_
++                    return P_, fx_ - ix_, fy_ - iy_
++                Pf_, dxf_, dyf_ = patches_(Sf_)
++                Pn_, dxn_, dyn_ = patches_(Sn_)
++                vf_, cf_ = score_states(Sf_); vn_, cn_ = score_states(Sn_)
++                np.savez_compressed(FXD, Sf=Sf_, Sn=Sn_, Pf=Pf_, Pn=Pn_, dxf=dxf_, dyf=dyf_, dxn=dxn_, dyn=dyn_,
++                                    vf=vf_, cf=cf_, vn=vn_, cn=cn_, wf=wf, t=t, night=night, t_ep=t_ep,
++                                    pf=np.array([c_["p"] for c_ in fin_]), p0f=np.array([c_.get("p0", c_["p"]) for c_ in fin_]))
++                with open(FXD + ".json", "w") as f_:
++                    json.dump({"candidates": fin_}, f_)
++                log(f"feature dump: {len(Sf_)} final + {len(Sn_)} null -> {FXD}")
++            except Exception as ex:
++                import traceback
++                traceback.print_exc()
++                log("feature dump failed:", repr(ex)[:300])
+ 
++
+ def _ns_gpu_pairs(torch, dev, Q, pairs, tN, tref, vcx, vcy, vcs, VRAD, vmax, TOL, TD, d, oN, TF0, x0, y0, PIX, W, H,
+                   NMs, gsel, GOOD=2.5, MAXE=6_000_000):
+     """gen 51: GPU version of the night-seed pair search + forced night read-out for one distance.

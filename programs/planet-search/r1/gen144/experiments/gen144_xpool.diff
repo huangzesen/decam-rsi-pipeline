@@ -1,0 +1,20 @@
+59a60,66
+>     # gen 144 (TNO_FSTK_XP, default 1 on cuda, 0 elsewhere = gen143): the coarse pool is the recall cut (gen142 probes), and
+>     # the A100 finishes scenarios with ~35 % of the budget unused.  On cuda the pool grows to XPOOL x NPK coarse peaks
+>     # (default 200 -> 60000), capped so the per-peak best-hypothesis gather (nh x pool x K) stays under TNO_FSTK_GMAX, and
+>     # the native pre-pass pool NATWN grows by the same factor (still scaled by 24/N in _natwide).
+>     XP = os.environ.get("TNO_FSTK_XP", "1" if dev == "cuda" else "0") != "0"
+>     XPOOL = float(os.environ.get("TNO_FSTK_XPOOL", "200") or 50) if XP else RPOOL
+>     XGMAX = float(os.environ.get("TNO_FSTK_GMAX", "6e9") or 6e9)
+78a86,87
+>     # gen 144: with XP, NATWN grows per slice with the pool actually used (NPK_ / (RPOOL x NPK), set at the coarse cut)
+>     NATW_SC = XP and "TNO_FSTK_NATWN" not in os.environ and XPOOL > RPOOL
+467a477,479
+>             if XP and Dm3 is not None and XPOOL > RPOOL:
+>                 # gen 144: larger pool, bounded by the gather cost (nh hypotheses x pool x K co-adds), never below gen143's
+>                 NPK_ = max(NPK_, min(int(NPK * XPOOL), int(XGMAX / max(nh * K, 1))))
+524c536,537
+<                                                    NATWN, NATWC, NATWX, log, d, sc_co=sc)
+---
+>                                                    int(NATWN * max(1.0, NPK_ / max(NPK * RPOOL, 1.0))) if NATW_SC else NATWN,
+>                                                    NATWC, NATWX, log, d, sc_co=sc)

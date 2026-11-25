@@ -1,0 +1,100 @@
+Binary files $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/__pycache__/fastfits.cpython-312.pyc and ./stackd/__pycache__/fastfits.cpython-312.pyc differ
+Binary files $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/__pycache__/orbit.cpython-312.pyc and ./stackd/__pycache__/orbit.cpython-312.pyc differ
+diff -ru $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/finder.py ./stackd/finder.py
+--- $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ ./stackd/finder.py	2026-11-05 09:31:23
+@@ -1697,6 +1697,49 @@
+     return C, torch.cat(outV).cpu().numpy(), torch.cat(outK).cpu().numpy()
+ 
+ 
++def _ns_junk_masks(torch, F, dev, maps, cov, wf, nidx, H, W, deadline, jm_log):
++    """gen 88: per-night junk-area masks (float32 (H, W) 0/1 tensors or None) from the plain night co-adds."""
++    JC = max(8, int(os.environ.get("TNO_NS_JC", "32")))
++    JZF = float(os.environ.get("TNO_NS_JZF", "0.9"))
++    JK = float(os.environ.get("TNO_NS_JK", "5.0"))
++    JFMIN = float(os.environ.get("TNO_NS_JFMIN", "0.02"))
++    JMAXF = float(os.environ.get("TNO_NS_JMAXF", "0.85"))   # never mask more than this fraction of a night's area
++    fr = []
++    for idx in nidx:
++        acc = torch.zeros((H, W), dtype=torch.float32, device=dev)
++        cw = torch.zeros((H, W), dtype=torch.float32, device=dev)
++        for n in idx:
++            acc += maps[n].float() * float(wf[n]); cw += cov[n].float() * float(wf[n] ** 2)
++        z_ = torch.where(cw > 0, acc / torch.sqrt(torch.clamp(cw, min=1e-3)), torch.zeros_like(acc))
++        del acc, cw
++        wk_ = np.asarray(wf[idx], float)
++        zc_ = 5.0 * wk_.sum() / math.sqrt(max((wk_ ** 2).sum(), 1e-9))
++        lit = (z_ >= JZF * zc_).float()
++        del z_
++        f_ = F.avg_pool2d(lit[None, None], JC, JC, 0, ceil_mode=True, count_include_pad=False)[0, 0]
++        fr.append(f_.cpu().numpy().astype(np.float64))
++        del lit
++        if time.time() - T0 > deadline:
++            raise RuntimeError("deadline")
++    allf = np.concatenate([f.ravel() for f in fr])
++    med = float(np.median(allf)); mad = float(np.median(np.abs(allf - med))) * 1.4826
++    thr = max(JFMIN, med + JK * mad)
++    jm_log.append(f"cell {JC} px, lit z >= {JZF} x ceiling, pooled median {med:.4f} mad {mad:.4f} -> thr {thr:.4f}")
++    out = []
++    for f in fr:
++        bad = f > thr
++        if bad.mean() > JMAXF:
++            # keep the least-lit cells unmasked
++            q = np.quantile(f, JMAXF); bad = f > max(q, thr)
++        if not bad.any():
++            out.append(None); jm_log.append((0, int(bad.size), 0)); continue
++        m = torch.from_numpy((~bad).astype(np.float32)).to(dev)
++        m = m.repeat_interleave(JC, 0).repeat_interleave(JC, 1)[:H, :W].contiguous()
++        out.append(m)
++        jm_log.append((int(bad.sum()), int(bad.size), int((m == 0).sum().item())))
++    return out
++
++
+ def night_seeds(torch, F, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H, deadline, NS, log_):
+     """gen 31 (v2): per-night co-add seeds.  Each night's frames are co-added (weighted, S/N units), local maxima
+     with night z >= NZ are linked across nights: for each distance d (heliocentric d-frame, motion linear), a pair
+@@ -1798,6 +1841,21 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 88 (TNO_NS_JMASK, gen087 Next #1): junk-area mask.  Night 0 of inj7 has ~65 % of its area lit at the clamp
++    # ceiling (a bright/saturated region); its plateau peaks take cap slots and its NMs read-outs pass the >= 2.5 gate.
++    # Per night, on the plain (unshifted) co-add, the fraction of pixels >= JZF x ceiling is measured in JC px cells;
++    # cells whose fraction is an outlier of the pooled (all nights) cell distribution (> median + JK x 1.4826 MAD, and
++    # > JFMIN) are zeroed in that night's co-adds (peaks and NMs).  =0 gives gen085 exactly.
++    JMASK = os.environ.get("TNO_NS_JMASK", "1") != "0"
++    jmask = [None] * len(nu); jm_log = []
++    if JMASK:
++        try:
++            jmask = _ns_junk_masks(torch, F, dev, maps, cov, wf, nidx, H, W, deadline, jm_log)
++        except Exception as ex_:
++            log_(f"night seeds: junk mask disabled {repr(ex_)[:200]}")
++            jmask = [None] * len(nu)
++        if jm_log:
++            log_(f"night seeds: junk mask {jm_log[0]}; (cells masked, of, px masked) per night {jm_log[1:]}")
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1819,6 +1877,11 @@
+                 cw += shifted(cov[n].float(), dx_, dy_) * float(wf[n] ** 2)
+             z = torch.where(cw > 0, acc / torch.sqrt(torch.clamp(cw, min=1e-3)), torch.zeros_like(acc))
+             del acc, cw
++            if jmask[k_] is not None:
++                try:
++                    z = z * jmask[k_]
++                except Exception as ex_:
++                    log_(f"night seeds: junk mask apply failed {repr(ex_)[:200]}")
+             mp = F.max_pool2d(z[None, None], 5, 1, 2)[0, 0]
+             pk = (z == mp) & (z >= NZ)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+@@ -1887,6 +1950,10 @@
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
++    try:
++        log_(f"night seeds: min kept peak z per map {[round(float(z_.min()), 2) if len(z_) else None for z_ in ZK]}")
++    except Exception:
++        pass
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own

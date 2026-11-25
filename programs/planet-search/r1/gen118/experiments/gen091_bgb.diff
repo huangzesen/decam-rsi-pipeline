@@ -1,0 +1,21 @@
+--- ../workspace/submission/stackd/mapper.py	2026-11-02 04:24:28
++++ armC/stackd/mapper.py	2026-11-05 13:18:03
+@@ -26,6 +26,9 @@
+     return _TORCH
+ 
+ 
++BGB = int(os.environ.get('TNO_BGB', '128'))
++
++
+ def gauss1d(s):
+     k = int(math.ceil(3 * s))
+     x = np.arange(-k, k + 1, dtype=np.float32)
+@@ -227,7 +230,7 @@
+     good = (msk == 0) & np.isfinite(img)
+     if good.mean() < 0.2:
+         return None
+-    bg = background(img, good)
++    bg = background(img, good, BGB)  # gen 91: TNO_BGB block (128 = gen085)
+     if bg is None:
+         return None
+     s = max(fwhm, 2.0) / 2.355

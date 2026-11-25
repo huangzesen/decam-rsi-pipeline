@@ -1,0 +1,8 @@
+639c639
+<             dl_ = min(search_deadline, (time.time() - T0) + float(os.environ.get("TNO_FSTK_F", "0.20")) * budget)
+---
+>             dl_ = min(search_deadline, (time.time() - T0) + float(os.environ.get("TNO_FSTK_F", "0.30")) * budget)   # gen 137: 0.20 -> 0.30 (room for the gen136 rings)
+662c662
+<                     os.environ.get("TNO_FSTK_EXT", "0.85:1.12:40,0.72:1.28:40").split(",") if x.strip() and x.strip() != "0"]
+---
+>                     os.environ.get("TNO_FSTK_EXT", "0.85:1.12:40,0.85:1.28:40,0.72:1.28:40,0.72:1.28:55").split(",") if x.strip() and x.strip() != "0"]

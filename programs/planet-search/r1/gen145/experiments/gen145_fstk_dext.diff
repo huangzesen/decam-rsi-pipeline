@@ -1,0 +1,92 @@
+diff -ru -x _ history/gen143/submission/stackd/finder.py submission/stackd/finder.py
+--- history/gen143/submission/stackd/finder.py	2026-11-08 17:44:28
++++ submission/stackd/finder.py	2026-11-09 01:22:43
+@@ -631,6 +631,7 @@
+     # their own (wi FSTK_WI), kind 3 (outside the p null).  TNO_FSTK_ONLY=1 (debug) skips the window search.
+     FSTK_WI = 10 ** 6
+     FSTX_WI = 10 ** 6 + 1     # gen 136: fstk extension-pass rows
++    FSTD_WI = 10 ** 6 + 2     # gen 145: fstk distance-band pass rows (own seed cap, after the ring rows)
+     FST_ROWS = []
+     fst_only = False
+     if os.environ.get("TNO_FSTK", "1") == "1":
+@@ -698,7 +699,34 @@
+                 prev_ = pr_
+         except Exception as ex:
+             log("fstk ext failed:", repr(ex)[:300])
++        # gen 145 (TNO_FSTK_DEXT, "0" = gen143): distance-band extension passes.  Every fstk pass so far searched
++        # 30-70 au (TNO_FSTK_DMIN/DMAX), but the task counts every body beyond 25 au.  If the fstk slot still has time
++        # after the core sweep and the velocity rings (the A100; never on the Mac, where the core uses the whole slot),
++        # each band "DLO:DHI" here gets a full pass with the widest velocity ring's prior (no exclusion: these
++        # distances were never searched).  Bands are visited in order: 25-30 au first (plutinos / Neptune Trojans
++        # near 30 au, Centaurs beyond 25), then 70-90 au (detached / scattered bodies, slow and faint).
+         try:
++            dext_ = [tuple(float(v) for v in x.split(":")) for x in
++                     os.environ.get("TNO_FSTK_DEXT", "25:30,70:90").split(",") if x.strip() and x.strip() != "0"]
++            try:
++                wide_ = ext_[-1] if ext_ else prev_
++            except Exception:
++                wide_ = (0.72, 1.28, 40.0)
++            for dr_ in dext_:
++                left_ = dl_ - (time.time() - T0)
++                if left_ < float(os.environ.get("TNO_FSTK_DEXT_MIN", "15")):
++                    log(f"fstk dext {dr_}: skipped, {left_:.0f}s left in the fstk slot")
++                    break
++                log(f"fstk dext pass d {dr_[0]}-{dr_[1]} au, prior {wide_}: {left_:.0f}s left in the fstk slot")
++                xr_, xf_ = fstk_.fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0,
++                                             pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit,
++                                             prior=wide_, drange=dr_)
++                if xf_:
++                    best_all.extend(xr_); FST_ROWS.extend(xr_)
++                    frames.extend(xf_); wi_of.extend([FSTD_WI] * len(xf_))
++        except Exception as ex:
++            log("fstk dext failed:", repr(ex)[:300])
++        try:
+             if dev == "cuda":
+                 torch.cuda.empty_cache()
+         except Exception:
+@@ -1193,7 +1221,19 @@
+         NXS = int(float(os.environ.get("TNO_FSTX_NF", "0.25") or 0) * NSEED)
+     except Exception:
+         NXS = 0
+-    oo_all = sorted([j for j in range(len(best_all)) if wof[j] != FSTX_WI], key=lambda j: (rk[j], -best_all[j][0]))
++    # gen 145: distance-band rows (FSTD_WI) get their own cap (TNO_FSTD_NF x NSEED), appended after the ring rows, so
++    # the ring rows' seeds and their refinement slots are exactly gen143's; with no band rows nothing changes.
++    xd_ = sorted([j for j in range(len(best_all)) if wof[j] == FSTD_WI], key=lambda j: -best_all[j][0])
++    if xd_:
++        try:
++            NXD = int(float(os.environ.get("TNO_FSTD_NF", "0.1") or 0) * NSEED)
++        except Exception:
++            NXD = 0
++        log(f"fstk dext seeds: {min(len(xd_), NXD)} of {len(xd_)} band rows appended after {min(len(xs_), NXS)} ring rows")
++        xs_ = xs_[:NXS] + xd_[:NXD]
++        NXS = len(xs_)
++    oo_all = sorted([j for j in range(len(best_all)) if wof[j] not in (FSTX_WI, FSTD_WI)],
++                    key=lambda j: (rk[j], -best_all[j][0]))
+     oo = oo_all[:NSEED] + xs_[:NXS]
+     if xs_:
+         log(f"fstk ext seeds: {min(len(xs_), NXS)} of {len(xs_)} rows appended after the {min(NSEED, len(oo_all))} regular seeds")
+@@ -1233,7 +1273,7 @@
+     # gen 36: deep-window seeds are kind 3, kept OUT of the p null (TNO_DNULL=0: gen035 behaviour, they count as 2).
+     # The deep window's prior-restricted, differently scored peaks refine to a noise population of their own; mixed
+     # into the null they made p depend on what the deep window does (measured: null MAD 0.98 -> 1.36 with LMO).
+-    sdeep = np.array([(wi_of[r[6]] in deep_ids or wi_of[r[6]] in (FSTK_WI, FSTX_WI)) for r in best_all], bool) if os.environ.get("TNO_DNULL", "1") != "0" \
++    sdeep = np.array([(wi_of[r[6]] in deep_ids or wi_of[r[6]] in (FSTK_WI, FSTX_WI, FSTD_WI)) for r in best_all], bool) if os.environ.get("TNO_DNULL", "1") != "0" \
+         else np.zeros(len(best_all), bool)
+ 
+     # ---------------------------------------------------------------- 4. states, refinement on all exposures
+diff -ru -x _ history/gen143/submission/stackd/fstk.py submission/stackd/fstk.py
+--- history/gen143/submission/stackd/fstk.py	2026-11-08 20:43:58
++++ submission/stackd/fstk.py	2026-11-09 01:11:35
+@@ -27,9 +27,11 @@
+     return math.log(42.0 / d) if d <= 42.0 else K_ * math.log(d / 42.0)
+ 
+ def fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0, pole, GM, tframe, T0,
+-                deadline, log, fi0, C_AU=173.1446, orbit=None, prior=None, excl=None):
++                deadline, log, fi0, C_AU=173.1446, orbit=None, prior=None, excl=None, drange=None):
+     rows_out, frames_out = [], []
+     DMIN = float(os.environ.get("TNO_FSTK_DMIN", "30")); DMAX = float(os.environ.get("TNO_FSTK_DMAX", "70"))
++    if drange is not None:   # gen 145: distance-band extension pass (see stackd/finder.py TNO_FSTK_DEXT)
++        DMIN, DMAX = float(drange[0]), float(drange[1])
+     VLO = float(os.environ.get("TNO_FSTK_VLO", "0.85")); VHI = float(os.environ.get("TNO_FSTK_VHI", "1.12"))
+     ANG = math.radians(float(os.environ.get("TNO_FSTK_ANG", "25")))
+     # gen 136 (extension passes, see stackd/finder.py TNO_FSTK_EXT): prior = (VLO, VHI, ANG deg) replaces the core prior;

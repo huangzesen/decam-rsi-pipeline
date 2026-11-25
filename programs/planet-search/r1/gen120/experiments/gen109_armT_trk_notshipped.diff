@@ -1,0 +1,622 @@
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen109/workspace/submission/NOTES.md $RSI_SANDBOX/r1/gen109/tmp/armT/submission/NOTES.md
+--- $RSI_SANDBOX/r1/gen109/workspace/submission/NOTES.md	2026-11-06 13:30:07
++++ $RSI_SANDBOX/r1/gen109/tmp/armT/submission/NOTES.md	2026-11-06 14:38:19
+@@ -3021,3 +3021,17 @@
+ - The first version re-derived p from the blended z; A-body p fell (0.998 -> 0.93, 0.835 -> 0.48), which would cost
+   slots in the cross-scenario cut and weaken merge boosts, so the shipped version only re-orders (ranking identical
+   to the first version's when all candidates are evaluated).
++
++## gen109 arm T: same-night tracklet seeds for the V class (TNO_TRK, linker/trk.py; default OFF = gen108)
++- Tracklet = S/N>=5 detection + S/N>=4 partner in another exposure of the same night within 0.6"+5"/h*dt, calibrated
++  exposures only, not static (FP forced S/N median at the same sky spot on other nights <= 1). Cross-night tracklet pairs
++  under the BK linear model; near-circular prior |alpha-dot|/sqrt(GM g^3) in [0.85,1.12], within 45 deg of ecliptic east.
++  A 2-night pair does NOT fix gamma under this prior (ratio changes slowly: ~25 gamma steps, e.g. 42-52 au), so every
++  gamma is scored. Score = clipped forced S/N on the other nights' exposures minus the same-sky-spot median (static removal).
++- Costs < 5 s. Test sets (experiments/gen109_armT_injectV2.py: bright nights drawn from covered nights):
++  injV (scen03, 20 V, seed 11): only 4 bodies have both bright nights on 2-exposure nights; trk finds 3/20 at trk ranks 1,2,4 of 7.
++  injV2 (scen02, 6 nights all >= 2 exp, seed 12): ~17 targetable; trk finds 3/20 at trk ranks 0,8,17 of 51.
++- Why so few: V weak-night forced z at the true hypothesis is 1.7-3.3 (other nights S/N 0.5-1.5 x1.43 per exposure) while the
++  noise max over 1e3-2e4 hypotheses is 4-5 (static subtraction lowered the 99.9% quantile from 5.9 to 3.9). Information-limited.
++- Full wrapper inj7d (budget 1100, TNO_TRK=1): A 12, B 7, C 0, 19 top-25 hits, 0 dups (ref A 12, B 8, 18): neutral.
++  The calibrated p of trk candidates (<= 0.35 before null calibration) keeps them out of the global top 25: no gain, little risk.
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen109/workspace/submission/experiments/gen109_armT_evaltrk.py $RSI_SANDBOX/r1/gen109/tmp/armT/submission/experiments/gen109_armT_evaltrk.py
+--- $RSI_SANDBOX/r1/gen109/workspace/submission/experiments/gen109_armT_evaltrk.py	1969-12-31 16:00:00
++++ $RSI_SANDBOX/r1/gen109/tmp/armT/submission/experiments/gen109_armT_evaltrk.py	2026-11-06 14:20:04
+@@ -0,0 +1,26 @@
++# offline: run trk on dumped L, evaluate candidates vs truth (within 2" on >=3 nights)
++import sys, os, pickle, json, time, math
++sys.path.insert(0, "$RSI_SANDBOX/r1/gen109/tmp/armT/submission/linker")
++import numpy as np
++import orbit
++orbit.T0 = time.time()
++import trk
++L = pickle.load(open(sys.argv[1], "rb"))
++T = json.load(open(sys.argv[2])) if len(sys.argv) > 2 and sys.argv[2] != "-" else None
++t0 = time.time()
++out = trk.run_trk(L, 60)
++print("time", time.time() - t0, "n", len(out))
++et, eobs, enight, done = L["et"], L["eobs"], L["enight"], L["done"]
++if T:
++    tb = [orbit.predict_dirs(np.array(b["state"]), b["epoch_mjd"], et[done], eobs[done]) for b in T["bodies"]]
++    hits = []
++    for k, c in enumerate(out):
++        pd = orbit.predict_dirs(c["state"], L["t_ref"], et[done], eobs[done])
++        for j, P in enumerate(tb):
++            d = np.arccos(np.clip(np.sum(P * pd, 1), -1, 1)) / orbit.ARC
++            nts = len(np.unique(enight[done][d < 2.0]))
++            if nts >= 3:
++                hits.append((k, j)); print("HIT rank", k, "body", j, T["bodies"][j].get("cls"), "p", round(trk.p_trk(c), 3), c["z"], c["npos"], c["nneg"], c["nwith"], c["tsn"])
++    print("hits", len(hits), "bodies", len({j for _, j in hits}))
++for c in out[:30]:
++    print(round(trk.p_trk(c), 3), round(c["z"], 2), c["npos"], c["nneg"], c["nwith"], np.round(c["tsn"], 1), round(c["r"], 1))
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen109/workspace/submission/experiments/gen109_armT_injectV2.py $RSI_SANDBOX/r1/gen109/tmp/armT/submission/experiments/gen109_armT_injectV2.py
+--- $RSI_SANDBOX/r1/gen109/workspace/submission/experiments/gen109_armT_injectV2.py	1969-12-31 16:00:00
++++ $RSI_SANDBOX/r1/gen109/tmp/armT/submission/experiments/gen109_armT_injectV2.py	2026-11-06 14:20:04
+@@ -0,0 +1,255 @@
++"""Injection of synthetic TNOs into a copy of a dev scenario.
++
++python tools/inject.py SRC_SCEN DST_SCEN [--n 40] [--seed 1] [--procs 4]
++
++Bodies: heliocentric states at the mid time (r 30-60 au, near-circular prograde, inclination up to ~20 deg),
++placed inside the field at the mid time.  Per-exposure pixel positions from two-body + light time
++(submission/linker/orbit.py predict_dirs) and each CCD's TPV WCS.  Gaussian PSF (CCD FWHM header), flux set per
++exposure so that S/N = F*sqrt(sum(w*psf^2)) equals the body's target S/N (w = weight map).
++Classes: A (S/N 7-12, weight-1 region), B (S/N 5/sqrt(n_per_night)..4.8, weight-2 region), C (1.5-3, fainter).
++Only CCD HDUs that receive a source are re-encoded (RICE_1, row tiles, NO_DITHER, q=16); all other HDUs are copied
++byte for byte.  Weight and mask files are symlinked.  Truth -> DST/truth.json.
++"""
++import argparse, csv, io, json, math, os, sys
++import numpy as np
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, "$RSI_SANDBOX/r1/gen109/workspace/submission/linker")
++import orbit  # noqa: E402
++import fastfits  # noqa: E402
++
++OBL = math.radians(23.4392911)
++R_EQ_ECL = np.array([[1, 0, 0], [0, math.cos(OBL), -math.sin(OBL)], [0, math.sin(OBL), math.cos(OBL)]])  # ecl->eq
++
++
++def night_of(mjd):
++    return np.floor(np.asarray(mjd) + 0.3).astype(int)
++
++
++def read_rows(path):
++    with open(path) as f:
++        return list(csv.DictReader(f))
++
++
++def make_bodies(rows, meta, n, rng, ccd_boxes):
++    t = np.array([float(r["mjd_mid"]) for r in rows])
++    obs = np.array([[float(r["obs_x"]), float(r["obs_y"]), float(r["obs_z"])] for r in rows])
++    tmid = 0.5 * (t.min() + t.max())
++    im = int(np.argmin(np.abs(t - tmid)))
++    o = obs[im] + (obs[min(im + 1, len(t) - 1)] - obs[im]) * 0  # observer near mid
++    ra0, de0 = math.radians(meta["ra"]), math.radians(meta["dec"])
++    nA = nB = int(os.environ.get("INJ_NAB", round(n * 15 / 40)))
++    classes = ["V"] * n
++    nights = night_of(t)
++    nper = np.median(np.unique(nights, return_counts=True)[1])
++    bodies = []
++    for cls in classes:
++        for _try in range(200):
++            # random direction within 0.9 deg of centre, on a CCD at the mid time (approx: any CCD box)
++            rr = 0.9 * math.sqrt(rng.uniform()) ; th = rng.uniform(0, 2 * math.pi)
++            ra = ra0 + math.radians(rr * math.cos(th)) / math.cos(de0)
++            de = de0 + math.radians(rr * math.sin(th))
++            u = orbit.radec_to_unit(np.array(ra), np.array(de))
++            R = rng.uniform(30, 60)
++            # |o + rho u| = R
++            b = o @ u; c = o @ o - R * R
++            rho = -b + math.sqrt(b * b - c)
++            x = o + rho * u
++            xe = R_EQ_ECL.T @ x
++            rh = xe / np.linalg.norm(xe)
++            east = np.cross([0, 0, 1.0], rh); east /= np.linalg.norm(east)
++            north = np.cross(rh, east)
++            a = math.radians(rng.uniform(-20, 20))
++            vdir = math.cos(a) * east + math.sin(a) * north
++            vc = math.sqrt(orbit.GM / R) * rng.uniform(0.92, 1.05)
++            ve = vc * vdir + rh * vc * rng.uniform(-0.05, 0.05)
++            v = R_EQ_ECL @ ve
++            st = np.r_[x, v]
++            if cls == "A":
++                snr = rng.uniform(7, 12)
++            elif cls == "B":
++                snr = rng.uniform(min(5 / math.sqrt(max(nper, 1)) + 0.05, 3.5), 4.8)
++            else:
++                snr = rng.uniform(1.5, 3.0)
++            sc = float(os.environ.get("INJ_SNR_SCALE", "1"))
++            snr *= sc   # gen097: 1/0.7 puts the MEASURED S/N at the class targets
++            un = np.unique(nights)
++            bright = []
++            sn_night = {int(nn): float(sc * rng.uniform(0.5, 1.5)) for nn in un}
++            snr_e = [sn_night[int(nn)] for nn in nights]
++            bodies.append(dict(cls=cls, state=st.tolist(), epoch_mjd=float(tmid), snr=float(max(sn_night.values())),
++                               r_au=R, snr_e=snr_e, sn_night={str(k): v for k, v in sn_night.items()},
++                               bright_nights=[int(x) for x in bright]))
++            break
++    return bodies
++
++
++def body_radec(bodies, rows):
++    t = np.array([float(r["mjd_mid"]) for r in rows])
++    obs = np.array([[float(r["obs_x"]), float(r["obs_y"]), float(r["obs_z"])] for r in rows])
++    out = []
++    for b in bodies:
++        d = orbit.predict_dirs(b["state"], b["epoch_mjd"], t, obs)
++        ra = np.degrees(np.arctan2(d[:, 1], d[:, 0])) % 360
++        de = np.degrees(np.arcsin(np.clip(d[:, 2], -1, 1)))
++        out.append((ra, de))
++    return out
++
++
++def coverage(args):
++    ei, src, row, radec = args
++    import astropy
++    astropy.log.setLevel("ERROR")
++    from astropy.io import fits
++    from astropy.wcs import WCS
++    hc = fits.open(os.path.join(src, row["image"]))
++    ra = np.array([r[0][ei] for r in radec]); de = np.array([r[1][ei] for r in radec])
++    hit = set()
++    for k in range(1, len(hc)):
++        h = hc[k].header
++        if "CTYPE1" not in h:
++            continue
++        w = WCS(h)
++        nx, ny = int(h["NAXIS1"]), int(h["NAXIS2"])
++        px, py = w.all_world2pix(ra, de, 0)
++        hit |= set(np.where((px > 5) & (px < nx - 6) & (py > 5) & (py < ny - 6))[0].tolist())
++    return ei, hit
++
++
++def hdu_bytes(hdul_raw, k, raw):
++    fi = hdul_raw.fileinfo(k)
++    return raw[fi["hdrLoc"]: fi["datLoc"] + fi["datSpan"]]
++
++
++def process_exposure(args):
++    ei, src, dst, row, bodies, radec = args
++    import astropy
++    astropy.log.setLevel("ERROR")
++    from astropy.io import fits
++    from astropy.wcs import WCS
++    ipath = os.path.join(src, row["image"]); wpath = os.path.join(src, row["weight"])
++    raw = open(ipath, "rb").read()
++    hb = fits.open(io.BytesIO(raw), disable_image_compression=True)
++    hc = fits.open(io.BytesIO(raw))
++    hw = fits.open(wpath, disable_image_compression=True)
++    wext = {hw[k].header.get("EXTNAME", k): k for k in range(1, len(hw))}
++    ra = np.array([r[0][ei] for r in radec]); de = np.array([r[1][ei] for r in radec])
++    recs = []
++    parts = [hdu_bytes(hb, 0, raw)]
++    for k in range(1, len(hb)):
++        h = hc[k].header
++        newb = None
++        if "CTYPE1" in h:
++            w = WCS(h)
++            nx, ny = int(h["NAXIS1"]), int(h["NAXIS2"])
++            px, py = w.all_world2pix(ra, de, 0)
++            inside = np.where((px > 5) & (px < nx - 6) & (py > 5) & (py < ny - 6))[0]
++            if len(inside):
++                img = fastfits.read_tiled(hb[k])
++                if img is None:
++                    img = hc[k].data.astype(np.float32)
++                img = np.array(img, np.float32)
++                kw = wext.get(h.get("EXTNAME"), k)
++                wt = fastfits.read_tiled(hw[kw])
++                if wt is None:
++                    wt = fits.open(wpath)[kw].data
++                wt = np.nan_to_num(np.asarray(wt, np.float32))
++                fwhm = float(h.get("FWHM") or 4.0)
++                sig = fwhm / 2.3548
++                hr = int(math.ceil(4 * sig))
++                for j in inside:
++                    x0, y0 = px[j], py[j]
++                    ix, iy = int(round(x0)), int(round(y0))
++                    xs = slice(max(ix - hr, 0), min(ix + hr + 1, nx)); ys = slice(max(iy - hr, 0), min(iy + hr + 1, ny))
++                    yy, xx = np.mgrid[ys, xs]
++                    psf = np.exp(-0.5 * ((xx - x0) ** 2 + (yy - y0) ** 2) / sig ** 2)
++                    psf /= 2 * math.pi * sig * sig
++                    q = float(np.sum(wt[ys, xs] * psf ** 2))
++                    snr = bodies[j]["snr_e"][ei]
++                    F = snr / math.sqrt(q) if q > 0 else 0.0
++                    if F > 0:
++                        img[ys, xs] += (F * psf).astype(np.float32)
++                    recs.append(dict(body=int(j), exp=ei, ccd=h.get("EXTNAME"), x=float(x0), y=float(y0), flux=F,
++                                     snr=snr if F > 0 else 0.0, fwhm=fwhm,
++                                     skysig=float(h.get("SKYSIGMA") or 0), wmed=float(np.median(wt[ys, xs]))))
++                comp = fits.CompImageHDU(img, header=h, compression_type="RICE_1", tile_shape=(1, nx),
++                                         quantize_level=16, quantize_method=-1)
++                bio = io.BytesIO()
++                fits.HDUList([fits.PrimaryHDU(), comp]).writeto(bio)
++                rb = bio.getvalue()
++                hh = fits.open(io.BytesIO(rb), disable_image_compression=True)
++                newb = hdu_bytes(hh, 1, rb)
++                hh.close()
++        parts.append(newb if newb is not None else hdu_bytes(hb, k, raw))
++    out = os.path.join(dst, row["image"])
++    with open(out, "wb") as f:
++        for p in parts:
++            f.write(p)
++    return recs
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("src"); ap.add_argument("dst")
++    ap.add_argument("--n", type=int, default=40); ap.add_argument("--seed", type=int, default=1)
++    ap.add_argument("--procs", type=int, default=4)
++    a = ap.parse_args()
++    rows = read_rows(os.path.join(a.src, "exposures.csv"))
++    meta = json.load(open(os.path.join(a.src, "meta.json")))
++    os.makedirs(os.path.join(a.dst, "exposures"), exist_ok=True)
++    for fn in ("exposures.csv", "meta.json"):
++        open(os.path.join(a.dst, fn), "wb").write(open(os.path.join(a.src, fn), "rb").read())
++    for r in rows:
++        for key in ("weight", "mask"):
++            d = os.path.join(a.dst, r[key])
++            if not os.path.exists(d):
++                os.symlink(os.path.abspath(os.path.join(a.src, r[key])), d)
++    rng = np.random.default_rng(a.seed)
++    bodies = make_bodies(rows, meta, a.n, rng, None)
++    radec = body_radec(bodies, rows)
++    # gen109 armT fix: bright nights drawn from the nights each body is actually on a CCD (usable exposures)
++    from multiprocessing import Pool
++    ctasks = [(i, a.src, r, radec) for i, r in enumerate(rows) if (r.get("magzero") or "").strip() != ""]
++    with Pool(a.procs) as pool:
++        cov = pool.map(coverage, ctasks)
++    t_ = np.array([float(r["mjd_mid"]) for r in rows]); nights_ = night_of(t_)
++    nb2 = int(os.environ.get("INJ_NBRIGHT", "2"))
++    sc = float(os.environ.get("INJ_SNR_SCALE", "1"))
++    for j, b in enumerate(bodies):
++        cn = sorted({int(nights_[i]) for i, c in cov if j in c})
++        # prefer nights with >= 2 covered exposures when INJ_PREF2=1
++        br = list(rng.choice(cn, min(nb2, len(cn)), replace=False)) if cn else []
++        b["bright_nights"] = [int(x) for x in br]
++        for nn in br:
++            b["sn_night"][str(int(nn))] = float(sc * rng.uniform(7, 10))
++        b["snr_e"] = [b["sn_night"][str(int(nn))] for nn in nights_]
++        b["snr"] = float(max(b["sn_night"].values()))
++        b["cov_nights"] = cn
++    tasks = []
++    for i, r in enumerate(rows):
++        if (r.get("magzero") or "").strip() == "":   # gen105: bad-WCS / uncalibrated exposures get no bodies
++            d = os.path.join(a.dst, r["image"])
++            if not os.path.exists(d):
++                os.symlink(os.path.abspath(os.path.join(a.src, r["image"])), d)
++            continue
++        tasks.append((i, a.src, a.dst, r, bodies, radec))
++    from multiprocessing import Pool
++    with Pool(a.procs) as pool:
++        allrecs = sum(pool.map(process_exposure, tasks), [])
++    t = np.array([float(r["mjd_mid"]) for r in rows])
++    nights = night_of(t)
++    for j, b in enumerate(bodies):
++        ex = sorted({r["exp"] for r in allrecs if r["body"] == j})
++        b["exps"] = ex
++        b["nights"] = sorted({int(nights[e]) for e in ex})
++        b["ra"] = radec[j][0].tolist(); b["dec"] = radec[j][1].tolist()
++    json.dump(dict(bodies=bodies, injections=allrecs, src=a.src), open(os.path.join(a.dst, "truth.json"), "w"))
++    cnt = {}
++    for b in bodies:
++        cnt.setdefault(b["cls"], []).append(len(b["nights"]))
++    print("bodies per class, nights covered:", {k: v for k, v in cnt.items()})
++    print("injections:", len(allrecs))
++
++
++if __name__ == "__main__":
++    main()
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen109/workspace/submission/linker/link.py $RSI_SANDBOX/r1/gen109/tmp/armT/submission/linker/link.py
+--- $RSI_SANDBOX/r1/gen109/workspace/submission/linker/link.py	2026-11-06 07:28:37
++++ $RSI_SANDBOX/r1/gen109/tmp/armT/submission/linker/link.py	2026-11-06 14:38:19
+@@ -240,6 +240,30 @@
+     from forced import Forced
+     FP = Forced(results)
+     log(f'forced maps for {len(FP.maps)} exposures')
++    # gen109 armT: same-night tracklet pairs + near-circular prior (trk.py); TNO_TRK=0 reproduces gen108
++    TRK_EXTRA.clear()
++    if os.environ.get("TNO_TRK", "0") == "1" and not os.environ.get("TNO_NOSTACK"):
++        try:
++            import trk
++            Lt = dict(FP=FP, F=F, grid=grid, et=et, eobs=eobs, enight=enight, E=E, D=D, u=u, gi=gi, sn=sn,
++                      t_ref=t_ref, done=done, core=core, emz=B["emz"], ee=ee_)
++            if os.environ.get("TNO_TRK_DUMP"):
++                import pickle
++                pickle.dump(Lt, open(os.environ["TNO_TRK_DUMP"], "wb"))
++            tc = trk.run_trk(Lt, float(os.environ.get("TNO_TRK_T", "0.04")) * budget)
++            for c in tc:
++                d = dict(epoch_mjd=float(t_ref), state=[float(x) for x in c["state"]], p=round(trk.p_trk(c), 5))
++                if c["mag"] is not None and np.isfinite(c["mag"]):
++                    d["mag"] = round(c["mag"], 2)
++                TRK_EXTRA.append(d)
++            for c in tc[:20]:
++                log(f"trk cand p={trk.p_trk(c):.3f} z={c['z']:.2f} npos={c['npos']} nneg={c['nneg']} nwith={c['nwith']} tsn={c['tsn']} r={c['r']:.1f}")
++            cands.extend(TRK_EXTRA)
++            write()
++        except Exception as ex:
++            import traceback; traceback.print_exc()
++            log("trk failed", ex)
++            TRK_EXTRA.clear()
+     REASON = {}
+     CUR_PASS = [0]
+     def repair_fit(st2, res2, members):
+@@ -814,6 +838,9 @@
+     return out
+ 
+ 
++TRK_EXTRA = []
++
++
+ def publish(results_, cands, t_ref, write):
+     import os, json
+     cands.clear()
+@@ -828,4 +855,5 @@
+         if c["mag"] is not None and np.isfinite(c["mag"]):
+             d["mag"] = round(c["mag"], 2)
+         cands.append(d)
++    cands.extend(TRK_EXTRA)
+     write()
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen109/workspace/submission/linker/trk.py $RSI_SANDBOX/r1/gen109/tmp/armT/submission/linker/trk.py
+--- $RSI_SANDBOX/r1/gen109/workspace/submission/linker/trk.py	1969-12-31 16:00:00
++++ $RSI_SANDBOX/r1/gen109/tmp/armT/submission/linker/trk.py	2026-11-06 14:19:15
+@@ -0,0 +1,258 @@
++"""gen109 armT: same-night tracklet seeds for weight-4 bodies bright on only 1-2 nights (TNO_TRK).
++
++A detection (S/N >= TRK_SN) with a partner (S/N >= TRK_SN2) in another exposure of the same night, within the
++distance a TNO can move between them, is a tracklet: a real, non-static point source (noise peaks and cosmics do not
++repeat at the same place; stationary sources are already removed by the linker's static mask).  Two tracklets on two
++different nights, under the linker's linearised model at inverse distance gamma, fix (alpha, alpha-dot); the
++near-circular prior (|alpha-dot| ~ sqrt(GM gamma^3), prograde within TRK_ANG of ecliptic east) leaves only a narrow
++gamma range, so each tracklet pair gives about one orbit hypothesis.  It is tested by forced photometry on all other
++nights' exposures (clipped summed S/N + per-night sign count).  Survivors get a two-body state and a low p.
++"""
++import math, os, time
++import numpy as np
++from scipy.spatial import cKDTree
++from orbit import GM, C_AU, ARC, log, predict_dirs, fit_orbit
++
++TRK_SN = float(os.environ.get("TNO_TRK_SN", "5.0"))
++TRK_SN2 = float(os.environ.get("TNO_TRK_SN2", "4.0"))
++TRK_RATE = float(os.environ.get("TNO_TRK_RATE", "5.0"))     # arcsec/hour max within-night motion
++TRK_R0 = float(os.environ.get("TNO_TRK_R0", "0.6"))         # arcsec position tolerance of a tracklet partner
++TRK_CLO = float(os.environ.get("TNO_TRK_CLO", "0.85"))
++TRK_CHI = float(os.environ.get("TNO_TRK_CHI", "1.12"))
++TRK_ANG = float(os.environ.get("TNO_TRK_ANG", "45"))
++TRK_ZT = float(os.environ.get("TNO_TRK_ZT", "2.0"))
++TRK_P0 = float(os.environ.get("TNO_TRK_P0", "0.35"))
++TRK_ZC = float(os.environ.get("TNO_TRK_ZC", "4.0"))
++TRK_SMAX = float(os.environ.get("TNO_TRK_SMAX", "30"))      # tracklet S/N cap (very bright = variable/static residue)
++TRK_STAT = float(os.environ.get("TNO_TRK_STAT", "1.0"))     # >0: subtract the other nights' median at the same sky spot; mask if > this
++TRK_MZ = os.environ.get("TNO_TRK_MZ", "1") == "1"
++TRK_S1 = float(os.environ.get("TNO_TRK_S1", "0"))           # >0: single-exposure nights give S/N >= S1 pseudo-tracklets
++
++
++DBG = set()
++
++
++def tracklets(L):
++    gi, u, sn, E, et, enight = L["gi"], L["u"], L["sn"], L["E"], L["et"], L["enight"]
++    if TRK_MZ:
++        # uncalibrated exposures (empty magzero: bad WCS in the dev data) give no tracklet seeds
++        gi = gi[np.isfinite(L["emz"][E[gi]])]
++    reps = []
++    for nn in np.unique(enight[E[gi]]):
++        m = gi[(enight[E[gi]] == nn) & (sn[gi] >= TRK_SN2) & (sn[gi] < 200)]
++        ex = np.unique(E[m])
++        if len(ex) < 2:
++            if TRK_S1 > 0 and len(ex) == 1:
++                for x in m[(sn[m] >= TRK_S1) & (sn[m] <= TRK_SMAX)]:
++                    reps.append((x, x, int(nn), float(sn[x]), 0))
++            continue
++        ex = ex[np.argsort(et[ex])]
++        ix = {e: m[E[m] == e] for e in ex}
++        tr = {e: cKDTree(u[ix[e]]) for e in ex}
++        cand = []
++        for a in range(len(ex)):
++            for b in range(a + 1, min(a + 4, len(ex))):
++                dth = abs(et[ex[b]] - et[ex[a]]) * 24
++                if dth > 4.0:
++                    break
++                r = (TRK_RATE * dth + TRK_R0) * ARC
++                sd = tr[ex[a]].sparse_distance_matrix(tr[ex[b]], r, output_type="ndarray")
++                if len(sd) == 0:
++                    continue
++                i = ix[ex[a]][sd["i"]]; j = ix[ex[b]][sd["j"]]
++                ok = np.maximum(sn[i], sn[j]) >= TRK_SN
++                for x, y in zip(i[ok], j[ok]):
++                    cand.append(((sn[x] + sn[y]) / math.sqrt(2), x, y))
++        cand.sort(key=lambda c: -c[0])
++        used = set()
++        for s, x, y in cand:
++            if x in used or y in used or s > TRK_SMAX:
++                continue
++            used.add(x); used.add(y)
++            reps.append((x if sn[x] >= sn[y] else y, x if sn[x] < sn[y] else y, int(nn), float(s), 1))
++    return reps
++
++
++def run_trk(L, tmax):
++    t1 = time.time()
++    FP, F, grid = L["FP"], L["F"], L["grid"]
++    et, eobs, enight, E, D = L["et"], L["eobs"], L["enight"], L["E"], L["D"]
++    u, sn, t_ref, done, core = L["u"], L["sn"], L["t_ref"], L["done"], L["core"]
++    ee = L["ee"]
++    mexps = np.array([e for e in done if FP.has(e)])
++    if len(np.unique(enight[mexps])) < 3:
++        return []
++    reps = tracklets(L)
++    if len(reps) < 2:
++        return []
++    if TRK_STAT:
++        # tracklet on a faint static source (galaxy/star below the static mask): positive at the same sky spot on
++        # the other nights' exposures
++        ua = u[[r[0] for r in reps]]
++        nr = np.array([r[2] for r in reps])
++        ref = np.full((len(mexps), len(reps)), np.nan)
++        for k2, e2 in enumerate(mexps):
++            ref[k2] = FP.sample(e2, ua)
++            ref[k2, nr == enight[e2]] = np.nan
++        with np.errstate(all="ignore"):
++            med = np.nan_to_num(np.nanmedian(ref, axis=0), nan=0.0)
++        n0 = len(reps)
++        reps = [r for r, m_ in zip(reps, med) if m_ <= TRK_STAT]
++        log(f"trk: static test drops {n0 - len(reps)} of {n0} tracklets")
++        if len(reps) < 2:
++            return []
++    seeds = np.array([r[0] for r in reps]); part = np.array([r[1] for r in reps])
++    ns = np.array([r[2] for r in reps]); tsn = np.array([r[3] for r in reps]); real = np.array([r[4] for r in reps])
++    log(f"trk: {len(reps)} tracklets on {len(np.unique(ns))} nights in {time.time() - t1:.1f}s "
++        f"(per night {dict(zip(*np.unique(ns, return_counts=True)))})")
++    us = u[seeds] @ F.T
++    theta = us[:, :2] / us[:, 2:3]
++    obs_f = eobs @ F.T
++    ts = et[E[seeds]] - t_ref
++    os_ = obs_f[E[seeds]]
++    un = np.unique(ns)
++    mn = enight[mexps]
++    te = et[mexps] - t_ref
++    cosang = math.cos(math.radians(TRK_ANG))
++    hyp = {}
++    nh = 0
++    for g in grid:
++        if time.time() - t1 > tmax:
++            log("trk: gamma loop out of time")
++            break
++        tp = ts - 1.0 / (C_AU * g)
++        k_ = 0.5 * GM * g ** 3
++        f = 1.0 - k_ * tp * tp - g * os_[:, 2]
++        phi = theta * f[:, None] + g * os_[:, :2]
++        uu = 1.0 - k_ * tp * tp
++        npara = math.sqrt(2 * GM * g ** 3)
++        ncirc = math.sqrt(GM * g ** 3)
++        idx_n = [np.flatnonzero(ns == n_) for n_ in un]
++        trees = [cKDTree(phi[ix]) for ix in idx_n]
++        for p in range(len(un)):
++            for q in range(p + 1, len(un)):
++                dt = un[q] - un[p]
++                sd = trees[p].sparse_distance_matrix(trees[q], TRK_CHI * ncirc * (dt + 0.5) + 2 * ARC, output_type="ndarray")
++                if len(sd) == 0:
++                    continue
++                i = idx_n[p][sd["i"]]; j = idx_n[q][sd["j"]]
++                Dd = uu[i] * tp[j] - uu[j] * tp[i]
++                al = (phi[i] * tp[j, None] - phi[j] * tp[i, None]) / Dd[:, None]
++                ad = (uu[i, None] * phi[j] - uu[j, None] * phi[i]) / Dd[:, None]
++                adn = np.hypot(ad[:, 0], ad[:, 1])
++                rr = adn / ncirc
++                cs = (ad @ ee) / np.maximum(adn, 1e-30)
++                if DBG:
++                    for a, b, r_, c_, al_ in zip(i, j, rr, cs, al):
++                        if seeds[a] in DBG and seeds[b] in DBG:
++                            print("DBG pair", 1 / g, round(r_, 3), round(c_, 3), np.hypot(*al_) / (core + 2 * g))
++                ok = (real[i] + real[j] >= 1) & (np.hypot(al[:, 0], al[:, 1]) <= core + 2 * g) & (rr >= TRK_CLO) & (rr <= TRK_CHI) & (cs >= cosang)
++                for a, b, c, d, r_ in zip(i[ok], j[ok], al[ok], ad[ok], rr[ok]):
++                    nh += 1
++                    # every gamma of the near-circular range is scored (a 2-night pair does not fix gamma)
++                    hyp[(int(a), int(b), float(g))] = (g, c.copy(), d.copy(), float(r_))
++    log(f"trk: {nh} (pair, gamma) hypotheses, {len(hyp)} tracklet pairs in {time.time() - t1:.1f}s")
++    if not hyp:
++        return []
++    keys = list(hyp.keys())
++    G = np.array([hyp[k][0] for k in keys]); AL = np.array([hyp[k][1] for k in keys]); AD = np.array([hyp[k][2] for k in keys])
++    NA = ns[[k[0] for k in keys]]; NB = ns[[k[1] for k in keys]]
++    # forced photometry on all mapped exposures (linear model predictions)
++    N = len(keys)
++    S = np.zeros(N); Nn = np.zeros(N)
++    NS = {}
++    for k, e in enumerate(mexps):
++        if time.time() - t1 > tmax * 1.5:
++            break
++        tpe = te[k] - 1.0 / (C_AU * G)
++        kk = 0.5 * GM * G ** 3
++        ph = AL * (1 - kk * tpe * tpe)[:, None] + AD * tpe[:, None]
++        tt = (ph - G[:, None] * obs_f[e, :2]) / (1.0 - kk * tpe * tpe - G * obs_f[e, 2])[:, None]
++        vv = np.c_[tt, np.ones(N)] @ F
++        vv /= np.linalg.norm(vv, axis=1)[:, None]
++        oth = (NA != mn[k]) & (NB != mn[k])
++        s = np.full(N, np.nan)
++        s[oth] = FP.sample(e, vv[oth])
++        v = np.isfinite(s) & oth
++        if TRK_STAT and v.any():
++            # static-source test: the same sky position on the other nights' exposures (a body is elsewhere there)
++            w = np.flatnonzero(v)
++            ref = np.full((len(mexps), len(w)), np.nan)
++            for k2, e2 in enumerate(mexps):
++                if mn[k2] != mn[k]:
++                    ref[k2] = FP.sample(e2, vv[w])
++            with np.errstate(all="ignore"):
++                med = np.nanmedian(ref, axis=0)
++            med = np.nan_to_num(med, nan=0.0)
++            s[w] = s[w] - med
++            v[w[med > TRK_STAT]] = False
++        sc = np.where(v, np.clip(np.nan_to_num(s), -3.0, 4.0), 0.0)
++        S += sc; Nn += v
++        key = int(mn[k])
++        if key not in NS:
++            NS[key] = [np.zeros(N), np.zeros(N)]
++        NS[key][0] += sc; NS[key][1] += v
++    z = S / np.sqrt(np.maximum(Nn, 1.0))
++    npos = np.zeros(N, int); nneg = np.zeros(N, int); nwith = np.zeros(N, int)
++    for a_, b_ in NS.values():
++        zn = a_ / np.sqrt(np.maximum(b_, 1.0))
++        has = b_ > 0
++        nwith += has; npos += has & (zn > 1.0); nneg += has & (zn < -1.0)
++    if DBG:
++        for h, k in enumerate(keys):
++            if seeds[k[0]] in DBG and seeds[k[1]] in DBG:
++                print("DBG score", 1 / G[h], z[h], npos[h], nneg[h], nwith[h], Nn[h])
++    sel = np.flatnonzero((z >= TRK_ZT) & (npos >= 1) & (npos > nneg))
++    log(f"trk: {len(sel)} of {N} pass z>={TRK_ZT}; z quantiles {np.round(np.percentile(z, [50, 90, 99, 99.9]), 2)}")
++    order = sel[np.argsort(-(z[sel] + 0.5 * npos[sel]))]
++    log(f"trk: {len({keys[h][:2] for h in sel})} tracklet pairs pass")
++    out = []
++    kept_al = []
++    used = set()
++    REJ = {}
++    for h in order:
++        if len(out) >= int(os.environ.get("TNO_TRK_MAX", "60")) or time.time() - t1 > tmax * 2:
++            break
++        a, b = keys[h][:2]
++        g, al, ad = G[h], AL[h], AD[h]
++        if a in used or b in used:
++            continue
++        if kept_al and np.min(np.hypot(*(np.array(kept_al) - al).T)) < 4 * ARC:
++            continue
++        rf = np.array([al[0], al[1], 1.0]) / g
++        vf = np.array([ad[0], ad[1], 0.0]) / g
++        state0 = np.r_[F.T @ rf, F.T @ vf]
++        tpe = te - 1.0 / (C_AU * g); k_ = 0.5 * GM * g ** 3
++        ph = al[None] * (1 - k_ * tpe * tpe)[:, None] + ad[None] * tpe[:, None]
++        tt = (ph - g * obs_f[mexps, :2]) / (1.0 - k_ * tpe * tpe - g * obs_f[mexps, 2])[:, None]
++        vv = np.c_[tt, np.ones(len(tt))] @ F
++        vv /= np.linalg.norm(vv, axis=1)[:, None]
++        sa, sb = seeds[a], seeds[b]; pa, pb = part[a], part[b]
++        tobs = np.r_[et[mexps], et[E[[sa, pa, sb, pb]]]]  # (pa == sa for pseudo-tracklets: harmless repeat)
++        oobs = np.r_[eobs[mexps], eobs[E[[sa, pa, sb, pb]]]]
++        uobs = np.r_[vv, u[[sa, pa, sb, pb]]]
++        try:
++            st, res = fit_orbit(state0, t_ref, tobs, oobs, uobs)
++        except Exception:
++            if DBG and sa in DBG: print("DBG fitx")
++            REJ["fitx"] = REJ.get("fitx", 0) + 1; continue
++        if DBG and sa in DBG and sb in DBG:
++            print("DBG fit", np.round(res, 2), np.linalg.norm(st[:3]))
++        if not np.all(np.isfinite(st)) or res[-4:].max() > 1.0:
++            REJ["fit"] = REJ.get("fit", 0) + 1; continue
++        r = float(np.linalg.norm(st[:3]))
++        if not (25.5 < r < 300) or np.dot(st[3:], st[3:]) / 2 - GM / r >= 0:
++            REJ["r"] = REJ.get("r", 0) + 1; continue
++        kept_al.append(al); used.add(a); used.add(b)
++        mz = L["emz"]
++        mags = [mz[E[x]] - 2.5 * math.log10(D[x, 4]) for x in (sa, sb) if np.isfinite(mz[E[x]]) and D[x, 4] > 0]
++        out.append(dict(state=st, z=float(z[h]), npos=int(npos[h]), nneg=int(nneg[h]), nwith=int(nwith[h]),
++                        tsn=(float(tsn[a]), float(tsn[b])), r=r, mag=float(np.median(mags)) if mags else None))
++    log("trk rejects", REJ)
++    log(f"trk: {len(out)} candidates in {time.time() - t1:.1f}s; top {[(round(c['z'], 1), c['npos'], c['nwith']) for c in out[:10]]}")
++    return out
++
++
++def p_trk(c):
++    zz = c["z"] + 0.3 * (c["npos"] - 1) - 0.3 * c["nneg"]
++    return float(TRK_P0 / (1 + math.exp(-1.5 * (zz - TRK_ZC))))

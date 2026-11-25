@@ -1,0 +1,56 @@
+--- $RSI_SANDBOX/r1/gen086/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ $RSI_SANDBOX/r1/gen086/tmp/armA/stackd/finder.py	2026-11-05 07:01:49
+@@ -1798,6 +1798,13 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 86 (TNO_NS_SFV): single-frame artefact veto.  On nights with >= 2 frames, a capped map's peaks are re-read in
++    # each (group-shifted) frame at the peak pixel; the brightest frame's contribution is left out and the co-add of the rest is
++    # compared with what a real source of the peak's z predicts there (z * sqrt(remaining weight share), capped at the
++    # 5 sigma map clamp).  Peaks with leave-brightest-out z < SFF x that prediction are one-frame artefacts and dropped.
++    SFV = os.environ.get("TNO_NS_SFV", "1") != "0"
++    SFF = float(os.environ.get("TNO_NS_SFF", "0.35"))
++    sf_log = []
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1823,6 +1830,30 @@
+             pk = (z == mp) & (z >= NZ)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = z[yy, xx]
++            if SFV and len(idx) >= 2 and sc.numel() > CAP and time.time() - T0 < deadline:
++                try:
++                    P_ = int(sc.numel())
++                    WV = torch.zeros((len(idx), P_), dtype=torch.float32, device=dev)
++                    W2 = torch.zeros((len(idx), P_), dtype=torch.float32, device=dev)
++                    for jn, n in enumerate(idx):
++                        dx_, dy_ = int(round(float(sx[jn]))), int(round(float(sy[jn])))
++                        fm_ = shifted(maps[n].float(), dx_, dy_)
++                        fc_ = shifted(cov[n].float(), dx_, dy_)[yy, xx]
++                        WV[jn] = fm_[yy, xx] * float(wf[n]) * fc_
++                        W2[jn] = fc_ * float(wf[n] ** 2)
++                        del fm_
++                    bi_ = torch.argmax(WV, 0)
++                    oh_ = F.one_hot(bi_, len(idx)).T.to(torch.float32)
++                    rw_ = (W2 * (1 - oh_)).sum(0)
++                    zr_ = (WV * (1 - oh_)).sum(0) / torch.sqrt(torch.clamp(rw_, min=1e-6))
++                    sh_ = rw_ / torch.clamp(W2.sum(0), min=1e-6)
++                    ze_ = torch.clamp(sc.float() * torch.sqrt(sh_), max=5.0)
++                    keep_ = (rw_ <= 0) | (zr_ >= SFF * ze_)
++                    sf_log.append((len(idx), P_, int((~keep_).sum())))
++                    yy, xx, sc = yy[keep_], xx[keep_], sc[keep_]
++                    del WV, W2, oh_
++                except Exception as ex_:
++                    log_(f"night seeds: single-frame veto failed {repr(ex_)[:200]}")
+             if st_cnt is not None and sc.numel() > CAP:
+                 try:
+                     oth_ = st_cnt[yy, xx] - st_own[k_][yy, xx].float()
+@@ -1887,6 +1918,8 @@
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
++    if sf_log:
++        log_(f"night seeds: single-frame veto (frames, peaks, vetoed) per map {sf_log}")
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own

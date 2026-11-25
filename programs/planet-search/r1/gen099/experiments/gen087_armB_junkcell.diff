@@ -1,0 +1,140 @@
+Only in .: arm.diff
+Only in .: chk.py
+Only in .: diag.log
+Only in .: diag.pid
+Only in .: diag_out.json
+Only in .: out.json
+Only in .: run.log
+Only in .: run.pid
+Only in ./stackd/__pycache__: armb_diag.cpython-312.pyc
+Binary files $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/__pycache__/fastfits.cpython-312.pyc and ./stackd/__pycache__/fastfits.cpython-312.pyc differ
+Only in ./stackd/__pycache__: finder.cpython-312.pyc
+Only in ./stackd/__pycache__: mapper.cpython-312.pyc
+Binary files $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/__pycache__/orbit.cpython-312.pyc and ./stackd/__pycache__/orbit.cpython-312.pyc differ
+Only in ./stackd: armb_diag.py
+diff -ru $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/finder.py ./stackd/finder.py
+--- $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ ./stackd/finder.py	2026-11-05 08:30:18
+@@ -158,6 +158,9 @@
+     log(f"mapped {len(res)} exposures into {len(fm)} frames")
+     if len(fm) < 3:
+         return
++    import armb_diag
++    if armb_diag.on():
++        armb_diag.setup(fm, t_all, log)
+     obs_all = np.array([[float(r_["obs_x"]), float(r_["obs_y"]), float(r_["obs_z"])] for r_ in rows])
+     t = np.array([t_all[m].mean() for m in fm])
+     night = np.floor(t - 0.5).astype(int)
+@@ -433,6 +436,8 @@
+             log("template failed, skipped:", repr(ex)[:200])
+     maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
+     del nn, static
++    if armb_diag.on():
++        armb_diag.maps_stage(maps, TF0, x0, y0, PIX, W, H, log)
+     write_out(a.out, [])
+ 
+     # ---------------------------------------------------------------- 3. search window
+@@ -1039,6 +1044,17 @@
+                 st_ = np.r_[x[0], (x[1] - x[0]) / 1e-3]
+                 if np.all(np.isfinite(st_)):
+                     BPS.append(st_)
++            if armb_diag.on():
++                try:
++                    rr_ = [r for r in nrows if 0 <= r[7] < 100]
++                    SS_ = []
++                    for r in rr_:
++                        s_, ep_ = to_state((r[0], r[1], r[2], r[3], r[4], r[5], r[6] + off_))
++                        x = orbit.propagate(s_[:3], s_[3:], np.array([t_ep - ep_, t_ep - ep_ + 1e-3]))
++                        SS_.append(np.r_[x[0], (x[1] - x[0]) / 1e-3])
++                    armb_diag.seeds_stage("night rows (row rank)", np.array(SS_), t_ep, t, obs, log)
++                except Exception as ex_:
++                    log("armB diag rows failed", repr(ex_)[:200])
+             nrows2 = [r for r in nrows if r[7] >= 100]      # gen 80: TNO_NSEED2 n3-ranked rows
+             nrows = [r for r in nrows if 0 <= r[7] < 100]
+             for r in nrows[:4 * NSN]:
+@@ -1250,6 +1266,8 @@
+             g = np.where(ok3, np.maximum(g, 3), g)
+         return g
+ 
++    if armb_diag.on():
++        armb_diag.seeds_stage("all pre-refine", states, t_ep, t, obs, log, kinds=skind)
+     if len(states) == 0:
+         return
+     # dedup seeds by predicted positions on window exposures
+@@ -1760,6 +1778,9 @@
+     CEIL = os.environ.get("TNO_NS_CEIL", "1") != "0"     # gen 84: ceiling-plateau thinning in the peak cap (0 = gen083)
+     CEILF = float(os.environ.get("TNO_NS_CEILF", "0.25")); CEILC = max(1, int(os.environ.get("TNO_NS_CEILC", "5")))
+     ceil_log = []
++    ARMB = os.environ.get("TNO_ARMB", "1") != "0"
++    ACELL = max(4, int(os.environ.get("TNO_ARMB_CELL", "32"))); ADN = float(os.environ.get("TNO_ARMB_DN", "6"))
++    armb_log = []
+     nidx = [np.flatnonzero(night == u) for u in nu]
+     spans = np.array([float(t[i].max() - t[i].min()) * 24.0 for i in nidx])
+     # groups per night: span (hr) * 150"/hr * delta(1/d) / MSTEP, capped, and capped by total map memory
+@@ -1831,6 +1852,29 @@
+                     yy, xx, sc = yy[mov_], xx[mov_], sc[mov_]
+                 except Exception as ex_:
+                     log_(f"night seeds: static veto failed {repr(ex_)[:200]}")
++            # gen 87 armB (TNO_ARMB, 0 = gen085): junk-density priority in the cap.  Diagnosis (inj7) showed 13/15 weight-2
++            # bodies with a night co-add >= NZ on >= 2 nights but only 4/15 keeping >= 2 peaks after the cap: the cap is
++            # filled by peaks from dense clusters (bright / unmasked regions: 335k peaks >= 3.7 on one night).  Peaks are
++            # counted as occupied 8 px sub-cells per CELL px cell (3x3-cell neighbourhood); a Gaussian-noise map has ~0.03
++            # peaks >= 3.7 per 32 px cell, so >= DN (6) occupied sub-cells marks a junk cluster.  Peaks in junk cells are ranked after ALL clean peaks (z order kept within
++            # each class), in both the ceiling and sub-ceiling parts of the cap.  Peak z values themselves are unchanged.
++            junk_ = None
++            if ARMB and sc.numel() > CAP and time.time() - T0 < deadline:
++                try:
++                    cy_ = (yy // ACELL).long(); cx_ = (xx // ACELL).long()
++                    gh_, gw_ = H // ACELL + 1, W // ACELL + 1
++                    # occupied 8 px sub-cells (not raw peaks): a clamp-ceiling plateau of one bright source gives many tied
++                    # peaks but only a few sub-cells, so isolated bright bodies are not marked junk
++                    sub_ = ((yy // 8).long() * (W // 8 + 1) + (xx // 8).long()).cpu().numpy()
++                    _, fs_ = np.unique(sub_, return_index=True)
++                    fs_ = torch.from_numpy(fs_).to(yy.device)
++                    cnt_ = torch.zeros(gh_ * gw_, dtype=torch.float32, device=yy.device)
++                    cnt_.index_add_(0, (cy_ * gw_ + cx_)[fs_], torch.ones(fs_.numel(), dtype=torch.float32, device=yy.device))
++                    cnt_ = F.avg_pool2d(cnt_.reshape(1, 1, gh_, gw_), 3, 1, 1, count_include_pad=True)[0, 0] * 9.0
++                    junk_ = (cnt_.reshape(-1)[cy_ * gw_ + cx_] >= ADN - 0.5)
++                    armb_log.append((int(sc.numel()), int(junk_.sum()), round(float((cnt_ >= ADN - 0.5).float().mean()), 4)))
++                except Exception as ex_:
++                    log_(f"night seeds: armB junk priority failed {repr(ex_)[:200]}"); junk_ = None
+             if CEIL and sc.numel() > CAP:
+                 # gen 84 (TNO_NS_CEIL): the per-exposure maps are clamped (5 sigma), so with 1-2 frames per night the
+                 # night co-add of every saturated source is a flat plateau at the ceiling and each plateau pixel passes
+@@ -1847,11 +1891,17 @@
+                         cyx = (yy[ic_] // CEILC) * (W // CEILC + 1) + (xx[ic_] // CEILC)
+                         cn_ = cyx.cpu().numpy()
+                         _, f_ = np.unique(cn_, return_index=True)
+-                        ic_ = ic_[torch.from_numpy(np.sort(f_)).to(ic_.device)][:int(CEILF * CAP)]
++                        ic_ = ic_[torch.from_numpy(np.sort(f_)).to(ic_.device)]
++                        if junk_ is not None:
++                            ic_ = torch.cat([ic_[~junk_[ic_]], ic_[junk_[ic_]]])
++                        ic_ = ic_[:int(CEILF * CAP)]
+                     inc_ = torch.nonzero(~isc, as_tuple=True)[0]
+                     nf_ = CAP - int(ic_.numel())
+                     if inc_.numel() > nf_:
+-                        inc_ = inc_[torch.topk(sc[inc_], nf_).indices]
++                        if junk_ is not None:
++                            inc_ = inc_[torch.topk(sc[inc_].float() - 1000.0 * junk_[inc_].float(), nf_).indices]
++                        else:
++                            inc_ = inc_[torch.topk(sc[inc_], nf_).indices]
+                     top = torch.cat([ic_, inc_])
+                     ceil_log.append((nc0_, int(ic_.numel()), int(inc_.numel()),
+                                      round(float(sc[inc_].min()), 2) if inc_.numel() else None))
+@@ -1885,11 +1935,16 @@
+                 log_("night seeds: deadline during co-adds")
+                 return [], []
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
++    import armb_diag
++    if armb_diag.on():
++        armb_diag.night_stage(NMs, GC, GI, PK, ZK, nu, night, TF0, x0, y0, PIX, W, H, NZ, log_)
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own
++    if armb_log:
++        log_(f"night seeds: armB junk priority (cell {ACELL}, dn {ADN}) (peaks, junk peaks, junk area frac) per map {armb_log}")
+     if ceil_log:
+         log_(f"night seeds: ceiling thinning (n_ceil, kept_ceil, kept_sub, min_sub_z) per map {ceil_log}")
+     # sky unit vectors of night peaks

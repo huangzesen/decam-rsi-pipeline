@@ -1,0 +1,166 @@
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen112/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/stackd/finder.py	2026-11-06 14:56:50
++++ submission/stackd/finder.py	2026-11-06 20:12:37
+@@ -288,6 +288,33 @@
+         med = torch.median(s); sd = 1.4826 * torch.median(torch.abs(s - med))
+         maps[n] = ((m.float() - med) / torch.clamp(sd, min=1e-3)).to(torch.float16)
+     maps = torch.where(cov, maps, torch.zeros_like(maps))
++    PLIN_ = None   # gen 110 (arm B) diagnostic only: per-stage map values at TNO_TRUTH_PROBE positions
++    if os.environ.get("TNO_TRUTH_PROBE"):
++        try:
++            PLIN_ = []
++            for pr_ in json.load(open(os.environ["TNO_TRUTH_PROBE"])):
++                u_ = orbit.predict_dirs_b(np.array(pr_["state"], float)[None], pr_["epoch_mjd"], t, obs)[0]
++                q_ = u_ @ TF0.T
++                ix_ = np.rint((q_[:, 0] / q_[:, 2] - x0) / PIX).astype(np.int64); iy_ = np.rint((q_[:, 1] / q_[:, 2] - y0) / PIX).astype(np.int64)
++                ok_ = (ix_ >= 1) & (ix_ < W - 1) & (iy_ >= 1) & (iy_ < H - 1)
++                PLIN_.append((pr_.get("tag"), np.where(ok_, ix_, 1), np.where(ok_, iy_, 1), ok_))
++        except Exception as ex:
++            log("truth probe pix failed:", repr(ex)[:200]); PLIN_ = None
++
++    def pstage_(nm_, extra=None):
++        if not PLIN_:
++            return
++        for tg_, ix_, iy_, ok_ in PLIN_:
++            vv_ = []
++            for n_ in range(N):
++                if not ok_[n_] or not bool(cov[n_, iy_[n_], ix_[n_]]):
++                    vv_.append("x"); continue
++                v3_ = maps[n_, iy_[n_] - 1:iy_[n_] + 2, ix_[n_] - 1:ix_[n_] + 2].float()
++                vv_.append("%.1f/%.1f" % (float(v3_[1, 1]), float(v3_.max())))
++                if extra is not None:
++                    vv_[-1] += "/%s" % extra(iy_[n_], ix_[n_])
++            log(f"pstage {nm_} {tg_}: " + " ".join(vv_))
++    pstage_("norm")
+     # static sources: > 4 on >= 2 nights (dilated by 1 px)
+     nn = torch.zeros((H, W), dtype=torch.int16, device=dev)
+     # gen 20: bins = clusters of exposures separated by gaps > 0.06 d (was fixed 0.06-d boundaries, which split one
+@@ -298,6 +325,11 @@
+         o_t = np.argsort(t)
+         tbin = np.empty(len(t), int)
+         tbin[o_t] = np.r_[0, np.cumsum(np.diff(t[o_t]) > 0.06)]
++    # gen 112 (arm S): TNO_STOWN=1 -> per-frame static mask: frame n is masked where the excess is in >= SNEED bins
++    # OTHER than n's own bin (nn - b[own] >= SNEED), so a mover cannot mask itself; real static sources (all bins)
++    # stay masked.  The template exclusion then uses pixels static for every frame (nn >= SNEED + 1).  0 = gen110.
++    STOWN = os.environ.get("TNO_STOWN", "0") == "1"
++    bmask_ = {}
+     for u_ in np.unique(tbin):
+         idx = np.flatnonzero(tbin == u_)
+         b = torch.zeros((H, W), dtype=torch.bool, device=dev)
+@@ -305,11 +337,38 @@
+             b |= maps[n] > 4
+         b = F.max_pool2d(b[None, None].half(), 3, 1, 1)[0, 0] > 0
+         nn += b.to(torch.int16)
++        if STOWN or PLIN_:
++            bmask_[u_] = b
+     # gen 20: TNO_SNEED (default 2 = old).  3 (with >= 4 bins) keeps faint movers from being zeroed by one noise
+     # excursion in another bin, but measured no gain on the injected test (A 11/15 vs 12/15, B 0 either way).
+     nbin_ = len(np.unique(tbin))
+     SNEED = int(os.environ.get("TNO_SNEED", "2") or 2)
+     static = nn >= SNEED
++    static_own_ = None
++    if PLIN_:   # gen 112 (arm S) diagnostic: probe frames masked by the old rule vs the own-bin rule
++        try:
++            for tg_, ix_, iy_, ok_ in PLIN_:
++                no_ = nw_ = nc_ = 0
++                for n_ in range(N):
++                    if not ok_[n_] or not bool(cov[n_, iy_[n_], ix_[n_]]):
++                        continue
++                    nc_ += 1
++                    k_ = int(nn[iy_[n_], ix_[n_]]); kb_ = int(bmask_[tbin[n_]][iy_[n_], ix_[n_]])
++                    no_ += int(k_ >= SNEED); nw_ += int(k_ - kb_ >= SNEED)
++                log(f"stown probe {tg_}: covered {nc_} masked old {no_} own {nw_}")
++            fo_ = 0.0; fw_ = 0.0
++            for n_ in range(N):
++                cv_ = cov[n_]
++                d_ = float(cv_.float().sum().clamp(min=1))
++                fo_ += float((static & cv_).float().sum()) / d_ / N
++                fw_ += float((((nn - bmask_[tbin[n_]].to(torch.int16)) >= SNEED) & cv_).float().sum()) / d_ / N
++            log(f"stown probe: mean covered static fraction old {fo_:.4f} own {fw_:.4f}")
++        except Exception as ex:
++            log("stown probe failed:", repr(ex)[:200])
++    if STOWN:
++        static_own_ = static
++        static = nn >= SNEED + 1
++    pstage_("static", lambda y_, x_: "S%d" % int(nn[y_, x_]))
+     log(f"static fraction {float(static.float().mean()):.4f} ({nbin_} time bins, need {SNEED})")
+     # gen 71: deep static template.  T = median over nights of each night's median frame (a > 25 au mover sits on a
+     # given pixel on at most one night, so with >= 3 covered nights it cannot enter T).  T is subtracted only where it
+@@ -418,6 +477,7 @@
+                 if frac_ < 0.2:
+                     for n in range(N):
+                         maps[n] = torch.where(cov[n], maps[n] - sub_, maps[n])
++                pstage_("tmpl", lambda y_, x_: "T%.1f" % float(sub_[y_, x_]))
+                 log(f"template: sigma_T {float(sT):.3f}, subtract fraction {frac_:.4f}"
+                     f"{'' if frac_ < 0.2 else ' (too large, skipped)'}, {time.time() - t_tm:.1f}s, guard {TM_MAX:.0f}s, rows {rows_done}/{H}")
+                 del sub_
+@@ -442,6 +502,7 @@
+                                 sch_ = (1.0 / sc_).half()
+                                 for n in range(N):
+                                     maps[n] = maps[n] * sch_
++                                pstage_("lnorm", lambda y_, x_: "L%.2f" % float(sch_[y_, x_]))
+                                 del sch_
+                             log(f"lnorm: median scatter {float(mV):.3f} (count-normalised {LNC}), scaled fraction {lf_:.4f}"
+                                 f"{'' if lf_ < 0.25 else ' (too large, skipped)'}, mean scale {float(sc_.mean()):.3f}")
+@@ -452,8 +513,21 @@
+             del Tm, Vm
+         except Exception as ex:
+             log("template failed, skipped:", repr(ex)[:200])
+-    maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
+-    del nn, static
++    if STOWN:
++        STCLIP = float(os.environ.get("TNO_STOWN_CLIP", "0") or 0)   # gen 112: 0 = no cap
++        for n in range(N):
++            st_n = (nn - bmask_[tbin[n]].to(torch.int16)) >= SNEED
++            maps[n] = torch.where(st_n, torch.zeros_like(maps[n]), maps[n])
++            if STCLIP > 0:   # rescued pixels (old rule static, own rule not) are capped at STCLIP
++                rs_ = (nn >= SNEED) & ~st_n
++                maps[n] = torch.where(rs_, maps[n].clamp(max=STCLIP), maps[n])
++                del rs_
++        maps.clamp_(-3, 5)
++        log(f"stown: per-frame static mask (own bin excluded), strict-static fraction {float(static.float().mean()):.4f}")
++        del st_n, static_own_
++    else:
++        maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
++    del nn, static, bmask_
+     write_out(a.out, [])
+ 
+     # ---------------------------------------------------------------- 3. search window
+@@ -1727,6 +1801,16 @@
+             log(f"extra seeds: {len(refined) - nx0} of {len(best_extra)} refined in {time.time() - tx0:.1f}s")
+         except Exception as ex:
+             log("extra seeds failed:", repr(ex)[:300])
++    if os.environ.get("TNO_TRUTH_PROBE"):   # gen 110 (arm B) diagnostic only: per-exposure map values at probe states
++        try:
++            for pr_ in json.load(open(os.environ["TNO_TRUTH_PROBE"])):
++                s_ = np.array(pr_["state"], float)
++                x2_ = orbit.propagate(s_[:3], s_[3:], np.array([t_ep - pr_["epoch_mjd"], t_ep - pr_["epoch_mjd"] + 1e-3]))
++                S_ = np.concatenate([x2_[0], (x2_[1] - x2_[0]) / 1e-3])[None]
++                v_, c_ = score_states(S_)
++                log(f"truth probe {pr_.get('tag')}: vals {' '.join('%.1f' % x if cc else 'x' for x, cc in zip(v_[0], c_[0]))} total {float(total(v_, c_)[0]):.2f}")
++        except Exception as ex:
++            log("truth probe failed:", repr(ex)[:200])
+     SDD_ = os.environ.get("TNO_STAGE_DUMP")   # gen 109 (arm R) diagnostic: per-stage dumps (dir)
+     def sdump_(nm__, cs__):
+         if SDD_:
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen112/workspace/submission/stackd/fstk.py submission/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/stackd/fstk.py	2026-11-06 14:56:50
++++ submission/stackd/fstk.py	2026-11-06 20:02:04
+@@ -317,6 +317,8 @@
+                                     if a_ * qn > bestv:
+                                         bestv = a_ * qn; bh_ = (xi + ex, yi + ey, vx_, vy_)
+                     rsv = ""
++                    if bh_ is not None:
++                        rsv = " coadd vals [" + " ".join("%.1f" % (qn * float(Dq[k_, (P + int(round(bh_[3] * dts_c[k_])) + bh_[1]) * WD + P + int(round(bh_[2] * dts_c[k_])) + bh_[0]])) for k_ in range(K)) + "]"
+                     if Dm3 is not None and bh_ is not None:
+                         try:
+                             r_ = _rescore(torch, dev, Dm3, np.array([bh_[0]], float), np.array([bh_[1]], float),
+@@ -328,7 +330,7 @@
+                                 rk2 = int((s2sorted > r_[0][0]).sum())
+                                 dd_ = np.hypot(kx_ - bh_[0], ky_ - bh_[1])
+                                 jn_ = int(np.argmin(dd_))
+-                                rsv = (f", nearest kept row {dd_[jn_]:.1f}px s {ks_[jn_]:.2f} dv ({(kvx_[jn_] - pvx) / dv:.2f},{(kvy_[jn_] - pvy) / dv:.2f})"
++                                rsv = rsv + (f", nearest kept row {dd_[jn_]:.1f}px s {ks_[jn_]:.2f} dv ({(kvx_[jn_] - pvx) / dv:.2f},{(kvy_[jn_] - pvy) / dv:.2f})"
+                                        f" krank {int((ks_ > ks_[jn_]).sum())}")
+                                 rsv = rsv + (f", RESCORE clip{RCLIP} exact {r_[5][0]:.2f} local {r_[0][0]:.2f} truth-cont {r1_[5][0]:.2f} "
+                                        f"rank {rk2} slice-rescored max {s2sorted.max():.2f} 10th {s2sorted[min(9, len(s2sorted) - 1)]:.2f}")

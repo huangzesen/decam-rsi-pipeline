@@ -1,0 +1,120 @@
+diff -ru $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/finder.py ./stackd/finder.py
+--- $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ ./stackd/finder.py	2026-11-05 09:41:02
+@@ -158,6 +158,9 @@
+     log(f"mapped {len(res)} exposures into {len(fm)} frames")
+     if len(fm) < 3:
+         return
++    import armb_diag
++    if armb_diag.on():
++        armb_diag.setup(fm, t_all, log)
+     obs_all = np.array([[float(r_["obs_x"]), float(r_["obs_y"]), float(r_["obs_z"])] for r_ in rows])
+     t = np.array([t_all[m].mean() for m in fm])
+     night = np.floor(t - 0.5).astype(int)
+@@ -433,6 +436,8 @@
+             log("template failed, skipped:", repr(ex)[:200])
+     maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
+     del nn, static
++    if armb_diag.on():
++        armb_diag.maps_stage(maps, TF0, x0, y0, PIX, W, H, log)
+     write_out(a.out, [])
+ 
+     # ---------------------------------------------------------------- 3. search window
+@@ -1039,6 +1044,17 @@
+                 st_ = np.r_[x[0], (x[1] - x[0]) / 1e-3]
+                 if np.all(np.isfinite(st_)):
+                     BPS.append(st_)
++            if armb_diag.on():
++                try:
++                    rr_ = [r for r in nrows if 0 <= r[7] < 100]
++                    SS_ = []
++                    for r in rr_:
++                        s_, ep_ = to_state((r[0], r[1], r[2], r[3], r[4], r[5], r[6] + off_))
++                        x = orbit.propagate(s_[:3], s_[3:], np.array([t_ep - ep_, t_ep - ep_ + 1e-3]))
++                        SS_.append(np.r_[x[0], (x[1] - x[0]) / 1e-3])
++                    armb_diag.seeds_stage("night rows (row rank)", np.array(SS_), t_ep, t, obs, log)
++                except Exception as ex_:
++                    log("armB diag rows failed", repr(ex_)[:200])
+             nrows2 = [r for r in nrows if r[7] >= 100]      # gen 80: TNO_NSEED2 n3-ranked rows
+             nrows = [r for r in nrows if 0 <= r[7] < 100]
+             for r in nrows[:4 * NSN]:
+@@ -1250,6 +1266,8 @@
+             g = np.where(ok3, np.maximum(g, 3), g)
+         return g
+ 
++    if armb_diag.on():
++        armb_diag.seeds_stage("all pre-refine", states, t_ep, t, obs, log, kinds=skind)
+     if len(states) == 0:
+         return
+     # dedup seeds by predicted positions on window exposures
+@@ -1760,6 +1778,16 @@
+     CEIL = os.environ.get("TNO_NS_CEIL", "1") != "0"     # gen 84: ceiling-plateau thinning in the peak cap (0 = gen083)
+     CEILF = float(os.environ.get("TNO_NS_CEILF", "0.25")); CEILC = max(1, int(os.environ.get("TNO_NS_CEILC", "5")))
+     ceil_log = []
++    # gen 88 armC (TNO_ARMC_ISO, 0 = gen085): the ceiling slots (CEILF x CAP, one per CEILC px cell) were filled in RASTER
++    # order (np.unique first-index of torch.nonzero = top rows of the image first), so on a night with more ceiling
++    # cells than slots every ceiling peak below the first few hundred cells was dropped -- whatever it was.  Weight-1
++    # bodies (per-exposure S/N >= 5) ARE ceiling peaks.  Ceiling cells are now ranked by plateau isolation: the number
++    # of ceiling pixels in a (2R+1)^2 box around the peak.  A clamped point source gives a compact plateau (a few to a
++    # few tens of px); saturated/bright regions and extended residuals give large ones.  Most isolated first; ties keep
++    # the raster order.  Only the order inside the ceiling share changes; the share and the sub-ceiling part do not.
++    ISO = os.environ.get("TNO_ARMC_ISO", "1") != "0"
++    ISOR = max(1, int(os.environ.get("TNO_ARMC_ISOR", "6")))
++    iso_log = []
+     nidx = [np.flatnonzero(night == u) for u in nu]
+     spans = np.array([float(t[i].max() - t[i].min()) * 24.0 for i in nidx])
+     # groups per night: span (hr) * 150"/hr * delta(1/d) / MSTEP, capped, and capped by total map memory
+@@ -1847,7 +1875,21 @@
+                         cyx = (yy[ic_] // CEILC) * (W // CEILC + 1) + (xx[ic_] // CEILC)
+                         cn_ = cyx.cpu().numpy()
+                         _, f_ = np.unique(cn_, return_index=True)
+-                        ic_ = ic_[torch.from_numpy(np.sort(f_)).to(ic_.device)][:int(CEILF * CAP)]
++                        f_ = np.sort(f_)
++                        if ISO and len(f_) > int(CEILF * CAP) and time.time() - T0 < deadline:
++                            try:
++                                cm_ = (z >= 0.97 * zc_).float()
++                                dn_ = F.avg_pool2d(cm_[None, None], 2 * ISOR + 1, 1, ISOR, count_include_pad=True)[0, 0]
++                                del cm_
++                                icf_ = ic_[torch.from_numpy(f_).to(ic_.device)]
++                                dv_ = (dn_[yy[icf_], xx[icf_]] * float((2 * ISOR + 1) ** 2)).round().cpu().numpy()
++                                del dn_
++                                o_ = np.argsort(dv_, kind="stable")
++                                iso_log.append((len(f_), int(np.median(dv_)), int(dv_[o_[int(CEILF * CAP) - 1]])))
++                                f_ = f_[o_]
++                            except Exception as ex_:
++                                log_(f"night seeds: armC isolation order failed {repr(ex_)[:200]}")
++                        ic_ = ic_[torch.from_numpy(f_).to(ic_.device)][:int(CEILF * CAP)]
+                     inc_ = torch.nonzero(~isc, as_tuple=True)[0]
+                     nf_ = CAP - int(ic_.numel())
+                     if inc_.numel() > nf_:
+@@ -1885,11 +1927,16 @@
+                 log_("night seeds: deadline during co-adds")
+                 return [], []
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
++    import armb_diag
++    if armb_diag.on():
++        armb_diag.night_stage(NMs, GC, GI, PK, ZK, nu, night, TF0, x0, y0, PIX, W, H, NZ, log_)
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own
++    if iso_log:
++        log_(f"night seeds: armC ceiling isolation order (R {ISOR}) (ceil cells, median plateau px, cutoff plateau px) per map {iso_log}")
+     if ceil_log:
+         log_(f"night seeds: ceiling thinning (n_ceil, kept_ceil, kept_sub, min_sub_z) per map {ceil_log}")
+     # sky unit vectors of night peaks
+@@ -1920,6 +1967,13 @@
+     z0 = TF0[2]
+     pole = np.array([0, -math.sin(EPS), math.cos(EPS)])
+     DTMAX = float(os.environ.get("TNO_NS_DTMAX", "25"))
++    # gen 88 armC (TNO_ARMC_DT, 0 = gen085): truth-traced loss on inj7 -- 13/15 weight-1 bodies keep a night peak on
++    # >= 2 nights but only 8 form a 3-night row.  With a dense night's cap losing a body's peaks, its remaining kept peaks
++    # are often > 25 d apart (8 nights over 57 d; DTMAX removed 13 of 28 night pairs on scen03), so no pair forms.
++    # Unless TNO_NS_DTMAX is set explicitly, all night pairs are linked (longer pairs also predict the 3rd night better).
++    if os.environ.get("TNO_ARMC_DT", "1") != "0" and not os.environ.get("TNO_NS_DTMAX"):
++        DTMAX = max(DTMAX, float(tN.max() - tN.min()) + 1.0)
++        log_(f"night seeds: armC all night pairs (DTMAX {DTMAX:.1f} d)")
+     pairs = [(a, b) for a in range(nN) for b in range(a + 1, nN) if tN[b] - tN[a] <= DTMAX]
+     if not pairs:
+         pairs = [(a, a + 1) for a in range(nN - 1)]

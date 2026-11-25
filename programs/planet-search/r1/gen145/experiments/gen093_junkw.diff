@@ -1,0 +1,91 @@
+diff -ruN --exclude=experiments --exclude=__pycache__ $RSI_SANDBOX/r1/gen093/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen093/workspace/submission/stackd/finder.py	2026-11-05 14:24:52
++++ submission/stackd/finder.py	2026-11-05 15:08:02
+@@ -222,6 +222,42 @@
+     log(f"sky grid {W}x{H} at 1\"")
+     TF0_t = torch.tensor(TF0, dtype=torch.float32, device=dev)
+     maps = torch.full((N, H, W), float("nan"), dtype=torch.float16, device=dev)
++    # gen 93 (TNO_JUNKW, 0 = gen092): per-exposure x CCD junk score = fraction of S/N-map pixels above 3 sigma after a
++    # per-CCD median/MAD normalisation.  Gaussian noise gives 0.135 %; CCDs whose fraction exceeds JUNKF x the reference
++    # (max(Gaussian, median over all CCDs)) are down-weighted by w = JUNKF * ref / frac (continuous at the threshold).
++    # Applied AFTER the per-frame normalisation (single-exposure frames) or inside the weighted co-add (multi-exposure
++    # frames) so that a fully junk frame is not re-inflated by its own MAD.
++    JUNKW = os.environ.get("TNO_JUNKW", "1") != "0"
++    junk_w = {}
++    junk_post = []   # (frame n, iy0, iy1, ix0, ix1, mask, w) applied after the frame normalisation
++    if JUNKW:
++        try:
++            JUNKF = float(os.environ.get("TNO_JUNKF", "5.0")); JWMIN = float(os.environ.get("TNO_JUNK_WMIN", "0.05"))
++            fr_ = {}
++            for i in use:
++                for k_, (g, pm) in enumerate(res[i]["maps"]):
++                    a_ = np.asarray(pm, np.float32)[::2, ::2]
++                    a_ = a_[np.isfinite(a_)]
++                    if a_.size < 500:
++                        continue
++                    md_ = float(np.median(a_)); sd_ = 1.4826 * float(np.median(np.abs(a_ - md_)))
++                    if not sd_ > 0:
++                        continue
++                    fr_[(i, k_)] = float(np.mean(a_ > md_ + 3 * sd_))
++            if fr_:
++                ref_ = max(0.00135, float(np.median(list(fr_.values()))))
++                for key_, f_ in fr_.items():
++                    if f_ > JUNKF * ref_:
++                        junk_w[key_] = max(JWMIN, JUNKF * ref_ / f_)
++                nex_ = len({k[0] for k in junk_w})
++                log(f"junkw: {len(junk_w)}/{len(fr_)} exposure-CCDs flagged on {nex_} exposures (ref frac {ref_:.4f}, "
++                    f"median frac {float(np.median(list(fr_.values()))):.4f}, max {max(fr_.values()):.4f}); per exposure: "
++                    + " ".join(f"{i}:{sum(1 for k in junk_w if k[0] == i)}/{sum(1 for k in fr_ if k[0] == i)}"
++                               for i in sorted(use) if any(k[0] == i for k in junk_w)))
++        except Exception as ex:
++            log("junkw failed, disabled:", repr(ex)[:200])
++            junk_w = {}
++    junk_pre = []    # per exposure (multi-member frames): boxes to scale inside the co-add
+     def norm_(m):
+         s = m[::7, ::7]
+         s = s[torch.isfinite(s)].float()
+@@ -236,7 +272,8 @@
+       for i in mem:
+         if len(mem) > 1:
+             maps[n].fill_(float("nan"))
+-        for g, pm in res[i]["maps"]:
++        junk_pre = []
++        for k_g, (g, pm) in enumerate(res[i]["maps"]):
+             u = orbit.radec_to_unit(g["rc"], g["dc"]); p = TF0 @ u
+             cx, cy = p[0] / p[2], p[1] / p[2]
+             ix0 = max(0, int((cx - g["rad"] - x0) / PIX)); ix1 = min(W, int((cx + g["rad"] - x0) / PIX) + 1)
+@@ -264,10 +301,18 @@
+             sub = maps[n, iy0:iy1, ix0:ix1]
+             take = inside & torch.isfinite(v)
+             maps[n, iy0:iy1, ix0:ix1] = torch.where(take, v.to(torch.float16), sub)
++            if (i, k_g) in junk_w:
++                rec_ = (n, iy0, iy1, ix0, ix1, take.clone(), junk_w[(i, k_g)])
++                (junk_pre if len(mem) > 1 else junk_post).append(rec_)
+         res[i]["maps"] = None
+         if len(mem) > 1:
+             z = norm_(maps[n])
+             if z is not None:
++                for (_n, a0, a1, b0, b1, mk_, jw_) in junk_pre:
++                    try:
++                        z[a0:a1, b0:b1] = torch.where(mk_, z[a0:a1, b0:b1] * jw_, z[a0:a1, b0:b1])
++                    except Exception as ex:
++                        log("junkw pre failed:", repr(ex)[:120])
+                 f_ = torch.isfinite(z)
+                 wi_ = w_exp[i] if DW else 1.0
+                 acc += torch.where(f_, z * wi_, torch.zeros_like(z)); cnt += f_.float() * (wi_ * wi_)
+@@ -287,6 +332,15 @@
+             continue
+         med = torch.median(s); sd = 1.4826 * torch.median(torch.abs(s - med))
+         maps[n] = ((m.float() - med) / torch.clamp(sd, min=1e-3)).to(torch.float16)
++    if junk_post:
++        try:
++            for (n, a0, a1, b0, b1, mk_, jw_) in junk_post:
++                sub_ = maps[n, a0:a1, b0:b1]
++                maps[n, a0:a1, b0:b1] = torch.where(mk_, sub_.float() * jw_, sub_.float()).to(torch.float16)
++            log(f"junkw: down-weighted {len(junk_post)} CCD footprints post-normalisation")
++        except Exception as ex:
++            log("junkw post failed:", repr(ex)[:200])
++    del junk_post, junk_pre
+     maps = torch.where(cov, maps, torch.zeros_like(maps))
+     # static sources: > 4 on >= 2 nights (dilated by 1 px)
+     nn = torch.zeros((H, W), dtype=torch.int16, device=dev)

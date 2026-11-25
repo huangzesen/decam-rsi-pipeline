@@ -1,0 +1,143 @@
+diff -ru -x __pycache__ -x *.pyc $RSI_SANDBOX/r1/gen090/workspace/submission/stackd/finder.py $RSI_SANDBOX/r1/gen090/tmp/armB/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen090/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ $RSI_SANDBOX/r1/gen090/tmp/armB/stackd/finder.py	2026-11-05 11:59:41
+@@ -1697,6 +1697,47 @@
+     return C, torch.cat(outV).cpu().numpy(), torch.cat(outK).cpu().numpy()
+ 
+ 
++def _ns_resc(torch, dev, Ck, nN, tN, tref, TD, d, oN, TF0, x0, y0, PIX, W, H, NMs, gsel, m0s, s0s, RR=8, NR=16, CLH=4.0):
++    """gen 90 arm B (TNO_NS_RESC): local-contrast forced night evidence for night-seed rows.  For each candidate
++    (x, y, vx, vy at tref, d-frame) and each night, the (3x3 max-pooled) night co-add value v at the predicted pixel is
++    compared with NR samples on a ring of radius RR px around it: z' = (v - (m_ring - m0)) / max(1, s_ring / s0),
++    where m0, s0 are the median / MAD-sigma of the same map over random pixels (null calibration).  Clean sky gives
++    z' = v; dense junk / plateaus / star wings are suppressed.  Score = (sum clip(z', -2, CLH) - max) / sqrt(ncov - 1)
++    (leave-best-night-out).  Returns (score (K,), pix (K, nN, 2) int32)."""
++    K = len(Ck)
++    th = np.linspace(0, 2 * np.pi, NR, endpoint=False)
++    ox = torch.as_tensor(np.rint(RR * np.cos(th)).astype(np.int64), device=dev)
++    oy = torch.as_tensor(np.rint(RR * np.sin(th)).astype(np.int64), device=dev)
++    Z = torch.zeros((K, nN), dtype=torch.float32, device=dev); CV = torch.zeros((K, nN), dtype=torch.bool, device=dev)
++    PXY = np.zeros((K, nN, 2), np.int32)
++    for k in range(nN):
++        P = Ck[:, :2] + Ck[:, 2:] * (tN[k] - tref)
++        wv = TD[2][None] + P[:, 0:1] * TD[0][None] + P[:, 1:2] * TD[1][None]
++        X = d * wv / np.linalg.norm(wv, axis=1)[:, None] - oN[k][None]
++        q = X @ TF0.T
++        ix = np.rint((q[:, 0] / q[:, 2] - x0) / PIX).astype(np.int64)
++        iy = np.rint((q[:, 1] / q[:, 2] - y0) / PIX).astype(np.int64)
++        PXY[:, k, 0] = ix; PXY[:, k, 1] = iy
++        ok = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
++        ixt = torch.as_tensor(np.clip(ix, 0, W - 1), device=dev); iyt = torch.as_tensor(np.clip(iy, 0, H - 1), device=dev)
++        okt = torch.as_tensor(ok, device=dev)
++        M = NMs[gsel[k]]
++        v = M[iyt * W + ixt].float()
++        rx = (ixt[:, None] + ox[None]).clamp(0, W - 1); ry = (iyt[:, None] + oy[None]).clamp(0, H - 1)
++        ring = M[(ry * W + rx).reshape(-1)].float().reshape(K, NR)
++        m_ = ring.median(1).values
++        s_ = 1.4826 * (ring - m_[:, None]).abs().median(1).values
++        m0, s0 = m0s[gsel[k]], s0s[gsel[k]]
++        z = (v - (m_ - m0)) / torch.clamp(s_ / s0, min=1.0)
++        cv = okt & (v != 0)
++        Z[:, k] = torch.where(cv, z, torch.zeros_like(z)); CV[:, k] = cv
++    zc = torch.where(CV, Z.clamp(-2.0, CLH), torch.zeros_like(Z))
++    nc = CV.sum(1).float()
++    mx = torch.where(CV, zc, torch.full_like(zc, -9.0)).max(1).values
++    sc = (zc.sum(1) - mx) / torch.sqrt(torch.clamp(nc - 1, min=1.0))
++    return sc.cpu().numpy().astype(np.float64), PXY
++
++
+ def night_seeds(torch, F, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H, deadline, NS, log_):
+     """gen 31 (v2): per-night co-add seeds.  Each night's frames are co-added (weighted, S/N units), local maxima
+     with night z >= NZ are linked across nights: for each distance d (heliocentric d-frame, motion linear), a pair
+@@ -1885,6 +1926,24 @@
+                 log_("night seeds: deadline during co-adds")
+                 return [], []
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
++    # gen 90 arm B (TNO_NS_RESC, 0 = gen085): local-contrast forced-evidence rescore channel (see _ns_resc)
++    RESC = os.environ.get("TNO_NS_RESC", "0") != "0"
++    RESC_POOL = int(os.environ.get("TNO_NS_RESC_POOL", "100000"))
++    RESC_TL = float(os.environ.get("TNO_NS_RESC_TL", "40"))     # seconds allowed for the rescore (time guard)
++    resc_t = [0.0]; tkbest_r = {}; m0s, s0s = [], []
++    if RESC:
++        try:
++            gen_ = torch.Generator(device="cpu"); gen_.manual_seed(90)
++            ridx = torch.randint(0, H * W, (200000,), generator=gen_).to(dev)
++            for m_i in range(nm_i):
++                vv_ = NMs[m_i][ridx].float(); vv_ = vv_[vv_ != 0]
++                if vv_.numel() < 100:
++                    m0s.append(0.0); s0s.append(1.0); continue
++                md_ = vv_.median(); m0s.append(float(md_))
++                s0s.append(max(1e-3, float(1.4826 * (vv_ - md_).abs().median())))
++            log_(f"night seeds rescore: map null median {np.round(m0s, 2).tolist()} sigma {np.round(s0s, 2).tolist()}")
++        except Exception as ex_:
++            log_(f"night seeds rescore: null calibration failed {repr(ex_)[:200]}"); RESC = False
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
+     if st_log:
+@@ -2123,9 +2182,28 @@
+                         cy[m_, c_] = np.floor((q[:, 1] / q[:, 2] - y0) / PIX / TKC).astype(np.int64)
+                 KY = np.stack([o2[:, 0], cx[:, 0], cy[:, 0], o2[:, 1], cx[:, 1], cy[:, 1]], 1)
+                 _, fu = np.unique(KY, axis=0, return_index=True)
+-                fu = np.sort(fu)[:2 * NS]          # kk is sc-sorted, so the first occurrence is the best row per key
++                fu_all = np.sort(fu)
++                fu = fu_all[:2 * NS]          # kk is sc-sorted, so the first occurrence is the best row per key
+                 fi = len(frames)
+                 frames.append((TD, tref, oref))
++                if RESC and resc_t[0] < RESC_TL:
++                    try:
++                        t_r = time.time()
++                        rs_, pxy_ = _ns_resc(torch, dev, C[kk[fu_all]], nN, tN, tref, TD, d, oN, TF0t, x0, y0, PIX, W, H,
++                                             NMs, gsel, m0s, s0s)
++                        o_r = np.argsort(-rs_)[:2 * NS]
++                        for jr in o_r:
++                            jj = fu_all[jr]; j = kk[jj]; key = tuple(int(x_) for x_ in KY[jj])
++                            r_ = (float(sc[j]), d, float(C[j, 2]), float(C[j, 3]), float(C[j, 0]), float(C[j, 1]), fi,
++                                  int(ng[j]), float(rs_[jr]), pxy_[jr].reshape(-1).tolist())
++                            if key not in tkbest_r or tkbest_r[key][8] < r_[8]:
++                                tkbest_r[key] = r_
++                        if len(tkbest_r) > 2 * RESC_POOL:
++                            kb_ = sorted(tkbest_r.items(), key=lambda it: -it[1][8])[:RESC_POOL]
++                            tkbest_r.clear(); tkbest_r.update(kb_)
++                        resc_t[0] += time.time() - t_r
++                    except Exception as ex_:
++                        log_(f"night seeds rescore failed {repr(ex_)[:200]}"); RESC = False
+                 for jj in fu:
+                     j = kk[jj]; key = tuple(int(x_) for x_ in KY[jj])
+                     r_ = (float(sc[j]), d, float(C[j, 2]), float(C[j, 3]), float(C[j, 0]), float(C[j, 1]), fi, int(ng[j]))
+@@ -2154,6 +2232,36 @@
+         rows = rows + list(tkbest.values())
+         log_(f"night seeds: track-key dedup {len(tkbest)} distinct keys (cell {TKC} px)")
+     rows.sort(key=lambda r: -r[0])
++    if tkbest_r:
++        try:
++            rr_ = sorted(tkbest_r.values(), key=lambda r: -r[8])
++            log_(f"night seeds rescore: {len(rr_)} rows, {resc_t[0]:.1f}s, top rs {rr_[0][8]:.2f}, "
++                 f"rs at 1500/3000 {[round(rr_[i][8], 2) for i in (1499, 2999) if i < len(rr_)]}")
++            if os.environ.get("TNO_NS_RESC_DUMP"):
++                try:
++                    import pickle
++                    pickle.dump({"rows_sc": rows[:60000], "rows_rs": rr_[:60000], "frames": frames, "TF0": TF0,
++                                 "x0": x0, "y0": y0, "PIX": PIX, "tN": tN},
++                                open(os.environ["TNO_NS_RESC_DUMP"], "wb"))
++                except Exception as e_:
++                    log_(f"rescore dump failed {e_}")
++            # round-robin merge: sc-ranked and rs-ranked rows alternate (same track key once)
++            seen_ = set(); mg_ = []
++            for a_, b_ in zip(rows, rr_ + [None] * max(0, len(rows) - len(rr_))):
++                for r_ in (a_, b_):
++                    if r_ is None:
++                        continue
++                    k_ = (round(r_[1], 6), round(r_[4], 9), round(r_[5], 9), round(r_[2], 9), round(r_[3], 9))
++                    if k_ in seen_:
++                        continue
++                    seen_.add(k_); mg_.append(r_[:8])
++            for r_ in rr_[len(rows):]:
++                k_ = (round(r_[1], 6), round(r_[4], 9), round(r_[5], 9), round(r_[2], 9), round(r_[3], 9))
++                if k_ not in seen_:
++                    seen_.add(k_); mg_.append(r_[:8])
++            rows = mg_
++        except Exception as ex_:
++            log_(f"night seeds rescore merge failed {repr(ex_)[:200]}")
+     if rows2:
+         rows2.sort(key=lambda r: -r[0]); rows2 = rows2[:4 * NS2N]
+         log_(f"nseed2: {len(rows2)} n3-ranked rows (n3 >= {NS2Z}), top n3 {rows2[0][0]:.2f}")

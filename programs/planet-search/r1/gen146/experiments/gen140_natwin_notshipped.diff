@@ -1,0 +1,156 @@
+diff -ru --exclude experiments --exclude __pycache__ ../workspace/submission/stackd/finder.py arm_natwin/stackd/finder.py
+--- ../workspace/submission/stackd/finder.py	2026-11-08 14:25:14
++++ arm_natwin/stackd/finder.py	2026-11-08 17:13:35
+@@ -724,8 +724,25 @@
+     VCON = os.environ.get("TNO_VCON", "1") != "0"           # gen 35: velocity-space contrast in the deep window
+     DCLIP = float(os.environ.get("TNO_DCLIP", "4.0") or 0)   # gen 48: deep-window per-frame S/N winsorizing
+     LMO = os.environ.get("TNO_LMO", "1") != "0"             # gen 36: leave-max-out co-add stack in the deep window
++    # gen 140 (natwin, TNO_NATW, default 1; 0 = gen139): native-resolution re-score of window / deep-window peaks (the
++    # gen139 fstk native score, stackd/fstk.py _natscore).  Window peaks are read from 2x2 max-pooled 2" canvases (nearest
++    # warp, integer shift per frame), the same pooling loss gen139 removed from fstk, and the PTHR cut is applied on that
++    # statistic.  Per (window, distance): a pool of the best NATWN local maxima above TNO_NATW_T (lower than PTHR) is scored
++    # on the unpooled 1" maps (every frame at its own time, exact ray geometry, +-1 cell x +-1 dv local search), blended
++    # with the pooled score (scaled by the ratio of the top-NPEAK medians), and the best NPEAK are kept as the slice's rows
++    # (refined position / velocity).  Any exception -> gen139 rows for that slice.  Total time capped at NATW_TF x budget.
++    NATW = os.environ.get("TNO_NATW", "1") != "0"
++    NATW_DEEP = os.environ.get("TNO_NATW_DEEP", "1") != "0"
++    try:
++        NATWN = int(float(os.environ.get("TNO_NATW_N", "0") or 0)) or (2400 if cuda else 1200)
++        NATWT = float(os.environ.get("TNO_NATW_T", "3.0"))
++        NATW_TF = float(os.environ.get("TNO_NATW_TF", "0.08"))
++        NATW_CLIP = float(os.environ.get("TNO_FSTK_NCLIP", "3.0") or 3.0)
++    except Exception:
++        NATW = False
++    natw_mu = [None]; natw_t = [0.0]
+     deep_ids = set()
+-    deep_tn = [0.0, 0]            # time and frame-adds spent in the deep window (excluded from the extra-window rate)
++    deep_tn = [0.0, 0]           # time and frame-adds spent in the deep window (excluded from the extra-window rate)
+     deep_done = [not DEEP or len(np.unique(night)) < 3]
+     # gen 46: further deep windows with wider priors (vrad:dmin:dmax, comma-separated), queued one after another
+     # while their estimated cost fits the time left before search_deadline (the A100 otherwise idles ~40 %).
+@@ -945,6 +962,7 @@
+               if len(smed_) == len(sel):
+                   off_ = float((np.asarray(smed_) * (np.asarray(wsel, float) if DW else 1.0)).sum())
+               t1 = time.time()
++              bs_ok_ = False   # gen 140: set once this slice's score map bs / bic exist
+               # gen 35: velocity-space contrast (deep window only, TNO_VCON).  Per-pixel mean/std of the stack
+               # over ALL velocity hypotheses; the peak score becomes (best - mean) / std.  A real body lights one
+               # velocity; pixel-coherent artefacts (residual static sources, halos, edges) light many and are damped.
+@@ -1049,6 +1067,7 @@
+                           # all-uncovered plateau must not reach PTHR in windows with many frames)
+                           bs = torch.where(bs != 0, bs + off_ * norm, bs)
+                   bic = bidx.cpu()
++                  bs_ok_ = True
+                   pk = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > PTHR)
+                   yy, xx = torch.nonzero(pk, as_tuple=True)
+                   sc = bs[yy, xx]
+@@ -1074,7 +1093,54 @@
+               except Exception as ex:
+                   log("peak extraction failed:", ex)
+                   yy = xx = hh = sc = np.zeros(0)
+-              for j in range(len(sc)):
++              nwr_ = None
++              if NATW and bs_ok_ and (wi not in deep_ids or NATW_DEEP) and len(sel) >= 3 and natw_t[0] < NATW_TF * budget \
++                      and time.time() - T0 < search_deadline:
++                  t_nw0 = time.time()
++                  try:
++                      import fstk as fnat_
++                      natn_ = max(NPEAK, min(NATWN, int(NATWN * 24 / max(len(sel), 24))))
++                      pk2_ = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > min(NATWT, PTHR))
++                      y2_, x2_ = torch.nonzero(pk2_, as_tuple=True)
++                      s2t_ = bs[y2_, x2_]
++                      if s2t_.numel() > natn_:
++                          tp_ = torch.topk(s2t_, natn_).indices
++                          y2_, x2_, s2t_ = y2_[tp_], x2_[tp_], s2t_[tp_]
++                      h2_ = bic[y2_, x2_].numpy().astype(np.int64)
++                      y2_, x2_, s2_ = y2_.numpy(), x2_.numpy(), s2t_.numpy().astype(np.float64)
++                      if len(s2_):
++                          if natw_mu[0] is None:
++                              natw_mu[0] = np.asarray(fnat_._nat_med(torch, maps, NATW_CLIP), float)
++                          fs_, fex_, fey_, fevx_, fevy_ = fnat_._natscore(
++                              torch, dev, maps, obs[sel], t[sel] - tref, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
++                              x2_.astype(float), y2_.astype(float), np.asarray(VX, float)[h2_], np.asarray(VY, float)[h2_],
++                              dv, NATW_CLIP, natw_mu[0][sel], fidx=np.asarray(sel))
++                          okn_ = np.isfinite(fs_) & (fs_ < 1e3) & (fs_ > -1e8)
++                          if okn_.any():
++                              fsn_ = np.where(okn_, fs_, -1e9)
++                              npk_ = min(NPEAK, int(okn_.sum()))
++                              kk_ = float(np.median(np.sort(fsn_[okn_])[::-1][:npk_])) / max(float(np.median(np.sort(s2_)[::-1][:npk_])), 1e-6)
++                              kk_ = kk_ if (np.isfinite(kk_) and 0.2 < kk_ < 5.0) else 1.0
++                              use2_ = (kk_ * s2_ > fsn_) | ~okn_
++                              fs_ = np.where(use2_, kk_ * s2_, fs_)
++                              fex_ = np.where(use2_, 0.0, fex_); fey_ = np.where(use2_, 0.0, fey_)
++                              fevx_ = np.where(use2_, 0.0, fevx_); fevy_ = np.where(use2_, 0.0, fevy_)
++                              o3_ = np.argsort(-fs_)[:NPEAK]
++                              nold_ = len(set(zip(y2_[o3_].tolist(), x2_[o3_].tolist())) & set(zip(np.asarray(yy).tolist(), np.asarray(xx).tolist())))
++                              nwr_ = (fs_[o3_], x2_[o3_] + fex_[o3_], y2_[o3_] + fey_[o3_],
++                                      np.asarray(VX, float)[h2_[o3_]] + fevx_[o3_], np.asarray(VY, float)[h2_[o3_]] + fevy_[o3_])
++                              log(f"natw w{wi} d={d:.1f} ({time.time() - t_nw0:.1f}s): pool {len(s2_)} (>{min(NATWT, PTHR):.1f}), "
++                                  f"k {kk_:.2f}, native {int((~use2_[o3_]).sum())} of {len(o3_)} kept, max {fs_[o3_].max():.2f}, "
++                                  f"overlap with old peaks {nold_}/{len(sc)}")
++                  except Exception as ex:
++                      log("natw rescore failed:", repr(ex)[:200]); nwr_ = None
++                  natw_t[0] += time.time() - t_nw0
++              if nwr_ is not None:
++                  for j in range(len(nwr_[0])):
++                      px = (nwr_[1][j] + P - (WD - 1) / 2) * SP; py = (nwr_[2][j] + P - (HD - 1) / 2) * SP
++                      best_all.append((float(nwr_[0][j]), d, float(nwr_[3][j]) * SP, float(nwr_[4][j]) * SP, px, py, len(frames)))
++                  sc = nwr_[0]
++              for j in (range(len(sc)) if nwr_ is None else ()):
+                   # d-frame pixel coords (centre of Dm grid at (WD-1)/2)
+                   px = (xx[j] + P - (WD - 1) / 2) * SP; py = (yy[j] + P - (HD - 1) / 2) * SP
+                   best_all.append((float(sc[j]), d, VX[hh[j]] * SP, VY[hh[j]] * SP, px, py, len(frames)))
+diff -ru --exclude experiments --exclude __pycache__ ../workspace/submission/stackd/fstk.py arm_natwin/stackd/fstk.py
+--- ../workspace/submission/stackd/fstk.py	2026-11-08 16:11:22
++++ arm_natwin/stackd/fstk.py	2026-11-08 17:12:34
+@@ -742,7 +742,7 @@
+     return mu
+ 
+ 
+-def _natscore(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, dv, clip, mu):
++def _natscore(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, dv, clip, mu, fidx=None):
+     """gen 139 (TNO_FSTK_NAT): native-resolution re-score of fstk peaks.  xx, yy: kernel coords (canvas col/row - P,
+     sub-cell), vx, vy: velocity in canvas cells/day, at time tref (dts = frame time - tref).  Each frame n is sampled on the
+     unpooled 1" map at the track's exact position (ray from the frame's observer to radius d, as the warp does; linearised
+@@ -756,16 +756,18 @@
+     gv = np.arange(-round(VR / VS), round(VR / VS) + 1) * VS * dv
+     xx = np.asarray(xx, float); yy = np.asarray(yy, float); vx = np.asarray(vx, float); vy = np.asarray(vy, float)
+     b1, ex1, ey1, evx1, evy1 = _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
+-                                        xx, yy, vx, vy, clip, mu, gp, gv)
++                                        xx, yy, vx, vy, clip, mu, gp, gv, fidx=fidx)
+     g2p = np.array([-0.25, 0.0, 0.25]) * (PS / 0.5); g2v = np.array([-0.125, 0.0, 0.125]) * (VS / 0.25) * dv
+     b2, ex2, ey2, evx2, evy2 = _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
+-                                        xx + ex1, yy + ey1, vx + evx1, vy + evy1, clip, mu, g2p, g2v)
++                                        xx + ex1, yy + ey1, vx + evx1, vy + evy1, clip, mu, g2p, g2v, fidx=fidx)
+     return b2, ex1 + ex2, ey1 + ey2, evx1 + evx2, evy1 + evy2
+ 
+ 
+-def _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, clip, mu, gp, gv):
+-    """gen 139: one local-grid pass of _natscore (position offsets gp cells, velocity offsets gv cells/day)."""
+-    N, H, W = maps.shape
++def _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, clip, mu, gp, gv, fidx=None):
++    """gen 139: one local-grid pass of _natscore (position offsets gp cells, velocity offsets gv cells/day).
++    gen 140 (natwin): fidx (optional) = map index of frame k (obs/dts/wsel/mu are then per selected frame)."""
++    N0, H, W = maps.shape
++    N = N0 if fidx is None else len(fidx)
+     n = len(xx)
+     EX, EY, EVX, EVY = [a.ravel() for a in np.meshgrid(gp, gp, gv, gv, indexing="ij")]
+     G = len(EX)
+@@ -780,7 +782,7 @@
+     EVX_t = torch.tensor(EVX, dtype=f32, device=dev)[None]; EVY_t = torch.tensor(EVY, dtype=f32, device=dev)[None]
+     best = np.full(n, -1e9); arg = np.zeros(n, np.int64)
+     CH = max(1, int(2_000_000 // G))
+-    flat = maps.reshape(N, -1)
++    flat = maps.reshape(N0, -1)
+     for c0 in range(0, n, CH):
+         sl = slice(c0, min(n, c0 + CH)); m = sl.stop - sl.start
+         acc = torch.zeros((m, G), dtype=f32, device=dev)
+@@ -805,7 +807,7 @@
+             cv = torch.floor(v0 + vx_ * dX + vy_ * dY + 0.5)
+             ins = (cu >= 0) & (cu <= W - 1) & (cv >= 0) & (cv <= H - 1)
+             idx = (cv.clamp(0, H - 1).to(torch.int64) * W + cu.clamp(0, W - 1).to(torch.int64))
+-            val = flat[k][idx].float()
++            val = flat[k if fidx is None else int(fidx[k])][idx].float()
+             val = torch.where(ins & (val != 0), val.clamp(-clip, clip) - float(mu[k]), torch.zeros_like(val))
+             acc.add_(val, alpha=float(w[k]))
+             del cu, cv, ins, idx, val, dX, dY

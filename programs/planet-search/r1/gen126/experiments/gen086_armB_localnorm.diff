@@ -1,0 +1,110 @@
+--- $RSI_SANDBOX/r1/gen086/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ stackd/finder.py	2026-11-05 07:01:25
+@@ -1798,6 +1798,44 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 86 (TNO_NS_LNR): local noise renormalisation of each night/group co-add before peak selection.  The cap
++    # fillers (z 4-6.5) are not static; they likely sit where the true noise exceeds what the weight map claims (star
++    # halos, edges, bad columns, sky residuals).  Per LNRT x LNRT tile, scale = 1.4826 * MAD(z) over covered pixels,
++    # divided by the median tile scale (only LOCAL excess counts), bilinearly upsampled, floored at 1.  Peaks are
++    # found/ranked on z / scale and the forced read-out map NMs is built from z / scale too (a fake pair in a noisy
++    # region must not get its 3-night support from that same noise).  ZK keeps raw z; ceiling test uses raw z.
++    LNR = os.environ.get("TNO_NS_LNR", "1") != "0"
++    LNRT = max(16, int(os.environ.get("TNO_NS_LNRT", "64"))); LNRMIN = int(os.environ.get("TNO_NS_LNRMIN", "512"))
++    LNRNM = os.environ.get("TNO_NS_LNRNM", "1") != "0"
++    lnr_log = []; lnr_t = [0.0]
++    def lnr_scale(z, cw):
++        t0_ = time.time()
++        nty_ = -(-H // LNRT); ntx_ = -(-W // LNRT); Hp, Wp = nty_ * LNRT, ntx_ * LNRT
++        inf_ = float("inf")
++        zz = torch.full((Hp, Wp), inf_, dtype=torch.float32, device=z.device)
++        zz[:H, :W] = torch.where(cw > 0, z, torch.full_like(z, inf_))
++        tl = zz.reshape(nty_, LNRT, ntx_, LNRT).permute(0, 2, 1, 3).reshape(nty_ * ntx_, LNRT * LNRT)
++        del zz
++        ncv = torch.isfinite(tl).sum(1)
++        srt = torch.sort(tl, 1).values
++        mi_ = torch.clamp(ncv // 2, max=LNRT * LNRT - 1)
++        med = srt.gather(1, mi_[:, None])
++        dev_ = torch.abs(tl - torch.where(torch.isfinite(med), med, torch.zeros_like(med)))
++        dev_ = torch.where(torch.isfinite(tl), dev_, torch.full_like(dev_, inf_))
++        del srt
++        mad = torch.sort(dev_, 1).values.gather(1, mi_[:, None])[:, 0] * 1.4826
++        del dev_, tl
++        ok_ = (ncv >= LNRMIN) & torch.isfinite(mad) & (mad > 0)
++        if int(ok_.sum()) < 4:
++            return None, None
++        ref = torch.median(mad[ok_])
++        sc_ = torch.where(ok_, mad / torch.clamp(ref, min=1e-6), torch.ones_like(mad))
++        sc_ = torch.clamp(sc_, min=1.0)
++        frac = float((sc_[ok_] > 1.2).float().mean())
++        up = F.interpolate(sc_.reshape(1, 1, nty_, ntx_), size=(Hp, Wp), mode="bilinear", align_corners=False)[0, 0]
++        up = torch.clamp(up[:H, :W], min=1.0)
++        lnr_t[0] += time.time() - t0_
++        return up, (round(frac, 3), round(float(sc_.max()), 2), round(float(ref), 2))
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1818,11 +1856,29 @@
+                 acc += shifted(maps[n].float(), dx_, dy_) * float(wf[n])
+                 cw += shifted(cov[n].float(), dx_, dy_) * float(wf[n] ** 2)
+             z = torch.where(cw > 0, acc / torch.sqrt(torch.clamp(cw, min=1e-3)), torch.zeros_like(acc))
+-            del acc, cw
++            del acc
++            z_raw = z; zs_ = None
++            if LNR and time.time() - T0 < deadline:
++                try:
++                    up_, info_ = lnr_scale(z, cw)
++                    if up_ is not None:
++                        zs_ = z / up_
++                        mpr_ = F.max_pool2d(z[None, None], 5, 1, 2)[0, 0]
++                        npr_ = int(((z == mpr_) & (z >= NZ)).sum()); del mpr_
++                        lnr_log.append(info_ + (npr_,))
++                        del up_
++                except Exception as ex_:
++                    log_(f"night seeds: local noise renorm failed {repr(ex_)[:200]}")
++                    zs_ = None
++            del cw
++            if zs_ is not None:
++                z = zs_
+             mp = F.max_pool2d(z[None, None], 5, 1, 2)[0, 0]
+             pk = (z == mp) & (z >= NZ)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = z[yy, xx]
++            if zs_ is not None and lnr_log:
++                lnr_log[-1] = lnr_log[-1] + (int(sc.numel()),)
+             if st_cnt is not None and sc.numel() > CAP:
+                 try:
+                     oth_ = st_cnt[yy, xx] - st_own[k_][yy, xx].float()
+@@ -1840,7 +1896,7 @@
+                 try:
+                     wk_ = np.asarray(wf[idx], float)
+                     zc_ = 5.0 * wk_.sum() / math.sqrt(max((wk_ ** 2).sum(), 1e-9))
+-                    isc = sc >= 0.97 * zc_
++                    isc = (z_raw[yy, xx] if zs_ is not None else sc) >= 0.97 * zc_
+                     ic_ = torch.nonzero(isc, as_tuple=True)[0]
+                     nc0_ = int(ic_.numel())
+                     if nc0_:
+@@ -1877,16 +1933,19 @@
+                     top = torch.topk(sc, CAP).indices
+                 yy, xx, sc = yy[top], xx[top], sc[top]
+             GI[-1].append(nm_i)
+-            NMs[nm_i] = F.max_pool2d(z[None, None], 3, 1, 1)[0, 0].reshape(-1).half(); nm_i += 1
+-            del z, mp, pk
++            NMs[nm_i] = F.max_pool2d((z if LNRNM else z_raw)[None, None], 3, 1, 1)[0, 0].reshape(-1).half(); nm_i += 1
+             PK.append(np.stack([xx.cpu().numpy(), yy.cpu().numpy()], 1).astype(np.float64))
+-            ZK.append(sc.float().cpu().numpy())
++            ZK.append((z_raw[yy, xx] if zs_ is not None else sc).float().cpu().numpy())
++            del z, z_raw, zs_, mp, pk
+             if time.time() - T0 > deadline:
+                 log_("night seeds: deadline during co-adds")
+                 return [], []
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
++    if lnr_log:
++        log_(f"night seeds: local noise renorm (frac_tiles>1.2, max_scale, ref_mad, n_peaks_raw, n_peaks_lnr) per map "
++             f"{lnr_log} ({lnr_t[0]:.1f}s, NMs scaled {LNRNM})")
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own

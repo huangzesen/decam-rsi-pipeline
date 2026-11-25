@@ -1,0 +1,122 @@
+--- history/gen146/submission/stackd/finder.py	2026-11-09 02:27:12
++++ submission/stackd/finder.py	2026-11-09 04:33:54
+@@ -115,10 +115,15 @@
+     ex = np.cross([0, 0, 1.0], u0); ex /= np.linalg.norm(ex)
+     ey = np.cross(u0, ex)
+     return np.stack([ex, ey, u0])
++
++
++# gen 147 (TNO_SOUT): how many rows stackd keeps (dedup cap, rbg_cap and write_out); 200 = gen146.  More rows let
++# faint fstk tracks below stackd's top 200 reach the wrapper's raw-pixel vet and its promotion.
++SOUT = int(float(os.environ.get("TNO_SOUT", "200") or 200))
+ 
+ 
+ def write_out(path, cands):
+-    cands = sorted(cands, key=lambda c: -c["p"])[:200]
++    cands = sorted(cands, key=lambda c: -c["p"])[:SOUT]
+     tmp = path + ".tmp"
+     with open(tmp, "w") as f:
+         json.dump({"candidates": cands}, f)
+@@ -1228,6 +1233,23 @@
+     except Exception:
+         XTRA = 0.0
+     best_extra = [best_all[j] for j in oo_all[NSEED:NSEED + int(XTRA * NSEED)]] if XTRA > 0 else []
++    # gen 147 (TNO_FSTX_XTRA, 0 = gen146): fstk extension rows past the NXS cap were dropped outright; keep the next
++    # TNO_FSTX_XTRA x NXS of them (score order) as extra seeds, alternated 1:1 with the window extras, so they are
++    # refined if time remains before ref_deadline.  Kind 3 like every extra seed: the p null is unchanged.
++    try:
++        FXX = float(os.environ.get("TNO_FSTX_XTRA", "0") or 0)
++        if FXX > 0 and NXS > 0 and len(xs_) > NXS:
++            xx_ = [best_all[j] for j in xs_[NXS:NXS + int(FXX * NXS)]]
++            mix_ = []
++            for i_ in range(max(len(xx_), len(best_extra))):
++                if i_ < len(best_extra):
++                    mix_.append(best_extra[i_])
++                if i_ < len(xx_):
++                    mix_.append(xx_[i_])
++            log(f"fstx xtra: {len(xx_)} overflow ext rows alternated into {len(best_extra)} extra seeds")
++            best_extra = mix_
++    except Exception as ex:
++        log("fstx xtra failed:", repr(ex)[:200])
+     best_all = [best_all[j] for j in oo]
+     log(f"seeds: {len(best_all)} from windows {sorted(set(wof))}")
+     # gen 36: deep-window seeds are kind 3, kept OUT of the p null (TNO_DNULL=0: gen035 behaviour, they count as 2).
+@@ -1531,6 +1553,29 @@
+ 
+     wf2 = wf ** 2
+ 
++    # gen 147 (TNO_LBNO, see NOTES): leave-brightest-night-out stack S/N of each state = total() without the frames of
++    # the track's brightest night (night stack weighted like night3).  On the injected R set (stage dumps of ~8300
++    # refined tracks) it ranked the faint bodies best of 9 statistics (median body rank 89/73 vs total S/N 128/254):
++    # a noise track refined by CEM on the clamped 1" maps gets most of its S/N from one night, a real body does not.
++    def lbno_of(S, CH=4096):
++        out_ = np.full(len(S), -9.0)
++        for i0 in range(0, len(S), CH):
++            v, c = score_states(np.asarray(S[i0:i0 + CH], float))
++            v = v.astype(float)
++            ns_ = []
++            for idx in nights_idx:
++                wn = wf[idx]
++                s_ = (v[:, idx] * wn[None]).sum(1) / np.sqrt(np.maximum((c[:, idx] * (wn ** 2)[None]).sum(1), 1e-3))
++                ns_.append(np.where(c[:, idx].any(1), s_, -np.inf))
++            ns_ = np.stack(ns_, 1)
++            bi = np.argmax(ns_, 1)
++            keep = np.ones_like(c)
++            for k_, idx in enumerate(nights_idx):
++                keep[np.ix_(bi == k_, idx)] = False
++            c2 = c & keep
++            out_[i0:i0 + CH] = (v * c2 * wf[None]).sum(1) / np.sqrt(np.maximum((c2 * wf2[None]).sum(1), 1e-3))
++        return out_
++
+     def ring_bg(S, CH=50):
+         """gen 123 (TNO_RBG): along-track stacked ring (r >= 2.5 map px within a 9x9 box) median per state."""
+         oy_, ox_ = np.mgrid[-4:5, -4:5]
+@@ -1579,8 +1624,12 @@
+     except Exception:
+         RCLIP = 0.0
+ 
+-    def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None):
++    def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None, zl=None):
+         out = []
++        if zl is not None:   # gen 147 (TNO_LBNO): rank on the leave-brightest-night-out stack instead (see lbno_of)
++            sc = np.asarray(zl, float)
++            if os.environ.get("TNO_LBNO", "2") == "1":   # 1: LBNO only; 2: LBNO, kind-3 rows keep max(z, clipped z)
++                scq = None
+         ref_ = sc
+         try:
+             # gen 31 (v2): null population = refined window seeds (night/linker seeds are mostly real bodies)
+@@ -2084,13 +2133,23 @@
+             log("refined dump failed:", repr(ex)[:200])
+     if refined:
+         R = np.array(refined)
++        zl_ = None
++        if os.environ.get("TNO_LBNO", "2") != "0":
++            try:
++                t_l = time.time()
++                zl_ = lbno_of(R)
++                if not np.all(np.isfinite(zl_)) or len(zl_) != len(R):
++                    zl_ = None
++                log(f"lbno: {len(R)} refined tracks re-keyed by leave-brightest-night-out S/N in {time.time() - t_l:.1f}s")
++            except Exception as ex:
++                log("lbno failed:", repr(ex)[:200]); zl_ = None
+         cands = to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3), boost=False,
+-                         scq=np.array(rscq) if RCLIP > 0 else None)
++                         scq=np.array(rscq) if RCLIP > 0 else None, zl=zl_)
+         sdump_("tocands", cands)
+ 
+         def rbg_cap(cs):   # gen 124 (TNO_RBGCAP): ring background decides which rows make the 200 cap (membership only)
+             base = dedup(cs, score_states, t_ep)
+-            if os.environ.get("TNO_RBGCAP", "1") == "0" or os.environ.get("TNO_RBG", "1") == "0" or len(cs) <= 200 \
++            if os.environ.get("TNO_RBGCAP", "1") == "0" or os.environ.get("TNO_RBG", "1") == "0" or len(cs) <= SOUT \
+                     or time.time() - T0 > budget * float(os.environ.get("TNO_RBGCAP_DL", "0.97")):
+                 return base
+             try:
+@@ -3161,7 +3220,7 @@
+         if any(float(u @ d) > math.cos(6 * ARCR) for d in dirs):
+             continue
+         keep.append(c); dirs.append(u)
+-        if len(keep) >= 200:
++        if len(keep) >= SOUT:
+             break
+     return keep
+ 

@@ -1,0 +1,118 @@
+45a46
+>     PROBE_OLD = os.environ.get("TNO_FSTK_PROBE_OLD", "0") == "1"   # gen 127: 1 = gen126's (wrong at d != r) probe position
+107c108,176
+<     for di, d in enumerate(dg):
+---
+>     # gen 127 (TNO_FSTK_ADAPT, default 0 = gen126, NOT shipped: lost the threshold body B9 in a paired run, see NOTES): coverage-adaptive distance grid.  After ADN slices, predict the
+>     # time the remaining slices need (measured warp + other overhead per slice, + prior hypotheses / measured hyp/s);
+>     # if they do not fit in the deadline, re-plan the remaining slices once on the smallest coarser step (x1.25 .. x AMAX)
+>     # that fits (else AMAX), skipping new slices within half a new step of a done one, same closeness-to-42-au order.
+>     # Corrected truth probes (gen127) show a body's d-frame track is within ~0.4 px of linear at half a DSTEP-1 step and
+>     # ~0.7 px at half a 1.75 step (B8 stays the slice's #0-1 kept peak at 0.23 au off), while the Mac reaches only
+>     # 9-33 of 129 slices; so when time-limited, wider distance coverage beats density.  Identical to gen126 when the
+>     # predicted time fits.
+>     ADAPT = os.environ.get("TNO_FSTK_ADAPT", "0") != "0" and not DLIST and MAXD == 0
+>     AMAX = float(os.environ.get("TNO_FSTK_AMAX", "1.75"))
+>     ADN = int(os.environ.get("TNO_FSTK_ADN", "3"))
+>     sl_t = []          # per finished slice: (total s, warp s, kernel s, hyps)
+>     done_d = []
+>     replanned = False
+> 
+>     def _nprior(d_):
+>         b_ = oref @ z0; rho_ = -b_ + math.sqrt(b_ * b_ - oref @ oref + d_ * d_)
+>         w0_ = (oref + rho_ * z0) / d_
+>         TD_ = tframe(w0_)
+>         vc_ = np.cross(pole, w0_); vc_ = vc_ / np.linalg.norm(vc_) * math.sqrt(GM / d_)
+>         vcx_, vcy_ = (TD_[0] @ vc_) / d_ / SP, (TD_[1] @ vc_) / d_ / SP
+>         vcs_ = math.hypot(vcx_, vcy_)
+>         nv_ = int(VHI * vcs_ / dv) + 2
+>         ii_ = np.arange(-nv_, nv_ + 1)
+>         IX_, IY_ = np.meshgrid(ii_, ii_)
+>         VX_, VY_ = (IX_ * dv).ravel(), (IY_ * dv).ravel()
+>         sp2 = np.hypot(VX_, VY_)
+>         an2 = np.abs(np.arctan2(VX_ * vcy_ - VY_ * vcx_, VX_ * vcx_ + VY_ * vcy_))
+>         return int(((sp2 >= VLO * vcs_ - dv) & (sp2 <= VHI * vcs_ + dv) & (an2 <= ANG + dv / max(vcs_, 1e-9))).sum())
+> 
+>     di = -1
+>     while di + 1 < len(dg):
+>         di += 1
+>         if ADAPT and not replanned and len(sl_t) >= ADN:
+>             replanned = True
+>             try:
+>                 rem_t = deadline - (time.time() - T0)
+>                 st_ = np.array(sl_t, float)
+>                 hr_ = max(st_[:, 3].sum() / max(st_[:, 2].sum(), 1e-6), 1.0)
+>                 ov_ = float(np.mean(st_[:, 0] - st_[:, 2]))
+> 
+>                 def _cost(lst):
+>                     return sum(ov_ + _nprior(x_) / hr_ for x_ in lst)
+>                 need_ = _cost(dg[di:])
+>                 if need_ > 0.97 * rem_t:
+>                     pick_ = None
+>                     for f_ in (1.25, 1.5, AMAX):
+>                         if f_ > AMAX + 1e-9 or f_ <= DSTEP + 1e-9:
+>                             continue
+>                         st2 = step * f_ / DSTEP
+>                         n2 = max(1, int(math.ceil((hi - lo) / st2)))
+>                         g2 = [1 / (lo + (k + 0.5) * (hi - lo) / n2) for k in range(n2)]
+>                         g2 = [x_ for x_ in g2 if all(abs(1 / x_ - 1 / y_) > 0.5 * st2 for y_ in done_d)]
+>                         g2 = sorted(g2, key=lambda x_: abs(math.log(x_ / 42.0)))
+>                         c2 = _cost(g2)
+>                         pick_ = (f_, g2, c2)
+>                         if c2 <= 0.97 * rem_t:
+>                             break
+>                     if pick_ is not None:
+>                         dg = dg[:di] + pick_[1]
+>                         log(f"fstk adapt: {len(sl_t)} slices done at {hr_:.0f} hyp/s, ov {ov_:.1f}s/slice; remaining need "
+>                             f"{need_:.0f}s > {rem_t:.0f}s left -> step x{pick_[0]:.2f}: {len(pick_[1])} slices, predicted {pick_[2]:.0f}s")
+>                 else:
+>                     log(f"fstk adapt: remaining {len(dg) - di} slices need {need_:.0f}s of {rem_t:.0f}s left, grid kept")
+>             except Exception as ex:
+>                 log("fstk adapt failed:", repr(ex)[:200])
+>             if di >= len(dg):
+>                 break
+>         d = dg[di]
+320,325c389,418
+<                     wv = Xp / rp
+<                     q = TD @ wv
+<                     ppx, ppy = q[0] / q[2], q[1] / q[2]
+<                     wn = math.sqrt(1 + ppx ** 2 + ppy ** 2)
+<                     Vperp = Vp - (Vp @ wv) * wv
+<                     pvx = (TD[0] @ Vperp) * wn / d / SP; pvy = (TD[1] @ Vperp) * wn / d / SP
+---
+>                     if PROBE_OLD:
+>                         wv = Xp / rp
+>                         q = TD @ wv
+>                         ppx, ppy = q[0] / q[2], q[1] / q[2]
+>                         wn = math.sqrt(1 + ppx ** 2 + ppy ** 2)
+>                         Vperp = Vp - (Vp @ wv) * wv
+>                         pvx = (TD[0] @ Vperp) * wn / d / SP; pvy = (TD[1] @ Vperp) * wn / d / SP
+>                     else:
+>                         # gen 127: the gen126 probe used the body's HELIOCENTRIC direction, which is where the body sits in
+>                         # the d-frame only when d == r; at d != r it is off by ~|oref_perp| (1/d - 1/r) (2 px at 0.04 au,
+>                         # 3.7 px at 0.07 au here), which produced gen126's spurious "+-0.04 au window".  Now: the body's true
+>                         # d-frame position per co-add (topocentric ray from each frame's observer to radius d, exactly
+>                         # the inverse of the warp), linear least-squares fit over the co-adds -> position at tref, velocity.
+>                         pc_ = np.zeros((K, 2)); wc_ = np.zeros(K)
+>                         for k_, n in enumerate(sel):
+>                             lt_ = 0.0
+>                             for _ in range(2):
+>                                 xn_ = orbit.propagate(s_[:3], s_[3:], np.array([t[n] - lt_ - pr["epoch_mjd"]]))[0]
+>                                 lt_ = np.linalg.norm(xn_ - obs[n]) / C_AU
+>                             u_ = xn_ - obs[n]; u_ = u_ / np.linalg.norm(u_)
+>                             b_ = obs[n] @ u_; sr_ = -b_ + math.sqrt(b_ * b_ - obs[n] @ obs[n] + d * d)
+>                             q_ = TD @ ((obs[n] + sr_ * u_) / d)
+>                             g_ = int(gid_[k_]); pc_[g_] += [q_[0] / q_[2], q_[1] / q_[2]]; wc_[g_] += 1
+>                         pc_ /= np.maximum(wc_, 1)[:, None]
+>                         A_ = np.stack([np.ones(K), dts_c], 1)
+>                         cf_, *_ = np.linalg.lstsq(A_, pc_, rcond=None)
+>                         ppx, ppy = cf_[0]
+>                         pvx, pvy = cf_[1] / SP
+>                         res_ = pc_ - A_ @ cf_
+>                         lin_res = float(np.hypot(res_[:, 0], res_[:, 1]).max() / SP)
+366c459
+<                     log(f"fstk probe {pr.get('tag', '?')}: d={d:.2f} (r {rp:.2f}), |v|/vc {math.hypot(pvx, pvy) / vcs:.3f}, "
+---
+>                     log(f"fstk probe {pr.get('tag', '?')}: d={d:.2f} (r {rp:.2f}, lin-res {lin_res if not PROBE_OLD else -1:.2f}px), |v|/vc {math.hypot(pvx, pvy) / vcs:.3f}, "
+373a467
+>             sl_t.append((time.time() - t_d0, t_warp, dtc, nh)); done_d.append(d)

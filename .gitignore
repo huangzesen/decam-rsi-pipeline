@@ -1,0 +1,19 @@
+# data and outputs never belong in this repository
+data/
+out/
+outputs/
+private/
+scen_dev/
+scen_sealed/
+units/
+runs/
+*.fits
+*.fits.fz
+*.fits.gz
+*.npz
+*.npy
+*.jsonl
+*.log
+__pycache__/
+*.pyc
+.DS_Store

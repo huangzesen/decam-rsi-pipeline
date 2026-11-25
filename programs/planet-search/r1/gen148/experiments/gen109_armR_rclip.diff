@@ -1,0 +1,149 @@
+diff -ru -x __pycache__ workspace/submission/stackd/finder.py tmp/armR/submission/stackd/finder.py
+--- workspace/submission/stackd/finder.py	2026-11-06 07:28:37
++++ tmp/armR/submission/stackd/finder.py	2026-11-06 14:38:16
+@@ -1316,7 +1316,12 @@
+             return np.full(len(v), -9.0)
+         return np.sort(np.stack(ns, 1), 1)[:, -3]
+ 
+-    def to_cands(S, sc, nn_, kd=None, n3=None, boost=True):
++    try:
++        RCLIP = float(os.environ.get("TNO_RCLIP", "3.0") or 0)
++    except Exception:
++        RCLIP = 0.0
++
++    def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None):
+         out = []
+         ref_ = sc
+         try:
+@@ -1329,6 +1334,27 @@
+             ref_ = sc
+         med = np.median(ref_); mad = 1.4826 * np.median(np.abs(ref_ - med)) + 1e-3
+         z_ = (sc - med) / mad
++        zc_ = None
++        # gen 109 (arm R, TNO_RCLIP, default 3.0; 0 = gen108): fstk-seeded (kind 3) refined tracks also get a z from
++        # their CLIPPED stack (per-exposure S/N capped at RCLIP, same null rows), and keep the larger z.  CEM on the
++        # unclipped 1" maps inflates noise tracks (single bright pixels), so the fstk-found C25 refined to rank 467 of
++        # 7300 by total S/N but rank 19 by the clipped stack, and was cut by the 200-candidate cap.
++        try:
++            if RCLIP > 0 and kd is not None and scq is not None and len(kd) == len(S) == len(scq) and (kd == 3).any():
++                scq = np.asarray(scq, float)
++                if int((kd == 2).sum()) >= 30:
++                    rq_ = scq[kd == 2]
++                elif int((kd >= 2).sum()) >= 30:
++                    rq_ = scq[kd >= 2]
++                else:
++                    rq_ = scq
++                mq_ = np.median(rq_); sq_ = 1.4826 * np.median(np.abs(rq_ - mq_)) + 1e-3
++                zc_ = np.where(kd == 3, (scq - mq_) / sq_, -np.inf)
++                zc_ = np.where(np.isfinite(zc_) | (kd != 3), zc_, -np.inf)
++                z_ = np.where(zc_ > z_, zc_, z_)
++        except Exception as ex:
++            log("rclip failed:", repr(ex)[:200])
++            zc_ = None
+         n3n = None
+         try:
+             if N3 > 0 and n3 is not None and kd is not None and len(n3) == len(S) and int((kd == 2).sum()) >= 30:
+@@ -1349,6 +1375,8 @@
+             d_ = dict(epoch_mjd=float(t_ep), state=[float(x) for x in S[j]], p=float(min(max(p, pn if boost else 0.0, 1e-4), 0.999)))
+             if pn > 1e-3:
+                 d_["pn"] = float(min(pn, 0.999))
++            if zc_ is not None and kd[j] == 3 and np.isfinite(zc_[j]):
++                d_["zc"] = float(zc_[j])
+             out.append(d_)
+         return out
+ 
+@@ -1410,6 +1438,7 @@
+     rng = np.random.default_rng(1)
+     K = 384 if cuda else 192
+     refined, rsc, rng_, rkd, rn3 = [], [], [], [], []
++    rscq = []     # gen 109 (TNO_RCLIP): clipped-stack S/N of each refined state
+     rsrc2 = []
+     order_ = np.argsort(-seed_sc)
+     # gen 34: cross-validated rerank (see NOTES.md) needs time after refinement
+@@ -1669,9 +1698,11 @@
+         refined.append(bestS); rsc.append(total(v, c)[0]); rng_.append(nights_good(v, c)[0]); rkd.append(skind[j])
+         rsrc2.append(SRC2[0][0] <= j < SRC2[0][1])
+         rn3.append(float(night3(v, c)[0]))
++        rscq.append(float(total(np.minimum(v, RCLIP), c)[0]) if RCLIP > 0 else 0.0)
+         if (jj % 50) == 49:
+             R = np.array(refined)
+-            write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3)), score_states, t_ep))
++            write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3),
++                                            scq=np.array(rscq) if RCLIP > 0 else None), score_states, t_ep))
+     if best_extra and time.time() - T0 < ref_deadline - 5:
+         try:
+             tx0, nx0 = time.time(), len(refined)
+@@ -1688,16 +1719,40 @@
+                 refined.append(bestS); rsc.append(total(v, c)[0]); rng_.append(nights_good(v, c)[0]); rkd.append(3)
+                 rsrc2.append(False)
+                 rn3.append(float(night3(v, c)[0]))
++                rscq.append(float(total(np.minimum(v, RCLIP), c)[0]) if RCLIP > 0 else 0.0)
+                 if ((len(refined) - nx0) % 50) == 49:
+                     R = np.array(refined)
+-                    write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3)), score_states, t_ep))
++                    write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3),
++                                                    scq=np.array(rscq) if RCLIP > 0 else None), score_states, t_ep))
+             log(f"extra seeds: {len(refined) - nx0} of {len(best_extra)} refined in {time.time() - tx0:.1f}s")
+         except Exception as ex:
+             log("extra seeds failed:", repr(ex)[:300])
++    SDD_ = os.environ.get("TNO_STAGE_DUMP")   # gen 109 (arm R) diagnostic: per-stage dumps (dir)
++    def sdump_(nm__, cs__):
++        if SDD_:
++            try:
++                os.makedirs(SDD_, exist_ok=True)
++                json.dump({"candidates": cs__}, open(os.path.join(SDD_, nm__ + ".json"), "w"))
++            except Exception as ex:
++                log("stage dump failed:", repr(ex)[:200])
++    if refined and SDD_:
++        try:
++            os.makedirs(SDD_, exist_ok=True); vR_, cR_ = score_states(np.array(refined))
++            np.savez(os.path.join(SDD_, "refined_vc.npz"), v=vR_.astype(np.float32), c=cR_, wf=np.asarray(wf, np.float32),
++                     night=np.asarray(night), rsc=np.array(rsc), rkd=np.array(rkd), rng=np.array(rng_))
++            sdump_("refined", [dict(epoch_mjd=float(t_ep), state=[float(x) for x in refined[i]], p=0.5,
++                                    sc=float(rsc[i]), ng=int(rng_[i]), kd=int(rkd[i]), j=int(order_[i]) if i < len(order_) else -1,
++                                    seed=[float(x) for x in states[order_[i]]] if i < len(order_) else None)
++                               for i in range(len(refined))])
++        except Exception as ex:
++            log("refined dump failed:", repr(ex)[:200])
+     if refined:
+         R = np.array(refined)
+-        cands = to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3), boost=False)
++        cands = to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3), boost=False,
++                         scq=np.array(rscq) if RCLIP > 0 else None)
++        sdump_("tocands", cands)
+         cands = dedup(cands, score_states, t_ep)
++        sdump_("dedup", cands)
+ 
+         def n3boost(cs):   # gen 79: apply the n3 p path after any p reassignment (cv_rerank hands out sorted p values)
+             return [dict(c_, p=max(c_["p"], c_["pn"]), p0=c_["p"]) if "pn" in c_ else c_ for c_ in cs]
+@@ -1712,6 +1767,7 @@
+                 import traceback
+                 traceback.print_exc()
+                 log("cv rerank failed:", repr(ex)[:300])
++        sdump_("cv", n3boost(cands))
+         if os.environ.get("TNO_RANKX_PRE"):   # gen 82 diagnostics: pre-rankx output for a paired A/B
+             write_out(os.environ["TNO_RANKX_PRE"], n3boost(cands))
+         RXD = os.environ.get("TNO_RANKX_DUMP")   # gen 83 diagnostics: dir of per-variant outputs at rankx time (+n3boost)
+@@ -1733,6 +1789,7 @@
+         if N3 > 0:
+             cands = n3boost(cands)
+             log(f"n3 boosts: {sum(c_.get('p0', c_['p']) < c_['p'] for c_ in cands)} of {len(cands)} candidates")
++        sdump_("rankx", cands)
+         if POLISH:
+             try:
+                 cands = polish(cands)
+@@ -2795,6 +2852,14 @@
+     zp = np.array([cvz.get(id(c), (wtot[j] - mt) / st) if cvz is not None else (wtot[j] - mt) / st
+                    for j, c in enumerate(cands)])
+     key = W_ * zx + (1 - W_) * zp
++    try:   # gen 109 (arm R, TNO_RCLIP): fstk-seeded tracks keep their clipped-stack z (to_cands) if it is larger
++        if float(os.environ.get("TNO_RCLIP", "3.0") or 0) > 0:
++            zcl = np.array([float(c.get("zc", -np.inf)) for c in cands])
++            nup_ = int((zcl > key).sum())
++            key = np.where(zcl > key, zcl, key)
++            log_(f"rclip: {nup_} of {len(cands)} fstk tracks ranked by their clipped-stack z")
++    except Exception as ex:
++        log_("rclip rankx failed:", repr(ex)[:200])
+     pv = sorted([float(c["p"]) for c in cands], reverse=True)
+     if dump is not None:   # gen 83 diagnostics (TNO_RANKX_DUMP): every variant's reorder, same p values, same rule
+         zxs = {"min": zx} if MODE_ == "min" else {}

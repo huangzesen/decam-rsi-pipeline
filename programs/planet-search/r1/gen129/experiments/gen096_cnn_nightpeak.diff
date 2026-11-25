@@ -1,0 +1,187 @@
+--- $RSI_SANDBOX/r1/gen096/workspace/submission/stackd/finder.py	2026-11-05 14:24:52
++++ finder.py	2026-11-05 18:14:07
+@@ -1819,6 +1819,151 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 96 arm (TNO_NS_CNN): self-supervised CNN night-peak scorer.  When a night map has more peaks than the cap, the
++    # cap is filled by z_adj = z + CNNA * clamp(logit, -4, 4) instead of z.  The CNN is trained once (first map that
++    # overflows the cap) to separate synthetic point sources injected into the real map (shape = the map's own noise
++    # autocorrelation, which for a matched-filter S/N map equals the point-source profile) from the map's real peaks.
++    CNN = os.environ.get("TNO_NS_CNN", "1") != "0"
++    CNNA = float(os.environ.get("TNO_NS_CNNA", "0.5"))
++    CNN_R = 7
++    cnn_st = {"model": None, "failed": False, "t": 0.0, "log": [], "chg": []}
++    def cnn_cut(zp, Wp, cy, cx, R):
++        """(N, 2R+1, 2R+1) cutouts of padded map zp (flattened, row width Wp) centred at padded coords (cy, cx)"""
++        o_ = torch.arange(-R, R + 1, device=zp.device)
++        ind = (cy[:, None, None] + o_[None, :, None]) * Wp + (cx[:, None, None] + o_[None, None, :])
++        return zp[ind]
++    def cnn_norm(c):
++        cen = c[:, CNN_R, CNN_R].clamp(min=1.0)[:, None, None]
++        return torch.clamp(c / cen, -2.0, 2.0)[:, None]
++    def cnn_train(z, yy, xx, sc, zc_):
++        t0_ = time.time()
++        torch.manual_seed(1234)
++        rng_ = np.random.default_rng(1234)
++        R = CNN_R; RP = R + 2; RS = RP + 1
++        # point-source profile = noise autocorrelation of the clipped map (central crop)
++        h0, w0 = H // 2, W // 2; hs = min(H, 1024) // 2; ws = min(W, 1024) // 2
++        zc = z[h0 - hs:h0 + hs, w0 - ws:w0 + ws].float()
++        mk = (zc != 0).float()
++        zc = torch.clamp(zc, -4.0, 4.0) * mk
++        L = RS
++        hh, ww = zc.shape
++        A_ = torch.zeros((2 * L + 1, 2 * L + 1), dtype=torch.float32, device=z.device)
++        a_ = zc[L:hh - L, L:ww - L]; ma_ = mk[L:hh - L, L:ww - L]
++        for dy in range(-L, L + 1):
++            for dx in range(-L, L + 1):
++                b_ = zc[L + dy:hh - L + dy, L + dx:ww - L + dx]; mb_ = mk[L + dy:hh - L + dy, L + dx:ww - L + dx]
++                A_[dy + L, dx + L] = (a_ * b_).sum() / torch.clamp((ma_ * mb_).sum(), min=1.0)
++        A_ = A_ / torch.clamp(A_[L, L], min=1e-6)
++        A_ = torch.clamp(A_, min=0.0)
++        # 1-px lag summary for the log
++        acf1 = float(0.25 * (A_[L, L + 1] + A_[L, L - 1] + A_[L + 1, L] + A_[L - 1, L]))
++        Np = 6144; Nn = 6144
++        # positives: random in-coverage positions, stamp with sub-pixel jitter, amplitude 3.5-6
++        cand = torch.nonzero(z[RP:H - RP, RP:W - RP] != 0)
++        if cand.shape[0] < 1000:
++            raise RuntimeError("too little coverage")
++        sel = torch.from_numpy(rng_.integers(0, cand.shape[0], 3 * Np)).to(z.device)
++        py = cand[sel, 0] + RP; px = cand[sel, 1] + RP
++        zpad = F.pad(z.float()[None, None], (RS, RS, RS, RS))[0, 0]; Wp = W + 2 * RS
++        zpf = zpad.reshape(-1)
++        c19 = cnn_cut(zpf, Wp, py + RS, px + RS, RP)           # (N, 2RP+1, 2RP+1)
++        fy = torch.from_numpy(rng_.uniform(-0.5, 0.5, 3 * Np).astype(np.float32)).to(z.device)
++        fx = torch.from_numpy(rng_.uniform(-0.5, 0.5, 3 * Np).astype(np.float32)).to(z.device)
++        amp = torch.from_numpy(rng_.uniform(3.5, 6.0, 3 * Np).astype(np.float32)).to(z.device)
++        # bilinear sub-pixel shift of the stamp A_ (size 2L+1) cropped to 2RP+1 (L = RP+1 gives 1 px margin)
++        S0 = A_[1:-1, 1:-1]; Sxm = A_[1:-1, :-2]; Sxp = A_[1:-1, 2:]; Sym = A_[:-2, 1:-1]; Syp = A_[2:, 1:-1]
++        Sxy = {(sy, sx): A_[1 + sy:A_.shape[0] - 1 + sy, 1 + sx:A_.shape[1] - 1 + sx] for sy in (-1, 1) for sx in (-1, 1)}
++        ax = fx.abs()[:, None, None]; ay = fy.abs()[:, None, None]
++        sxs = torch.where(fx >= 0, 1, -1); sys_ = torch.where(fy >= 0, 1, -1)
++        # stamp value at (i - f): use neighbour in -sign(f) direction
++        Sx = torch.where((sxs > 0)[:, None, None], Sxm[None], Sxp[None])
++        Sy = torch.where((sys_ > 0)[:, None, None], Sym[None], Syp[None])
++        Sd = torch.stack([Sxy[(-1, -1)], Sxy[(-1, 1)], Sxy[(1, -1)], Sxy[(1, 1)]])
++        di = ((sys_ > 0).long() * 0 + (sys_ < 0).long() * 2) + ((sxs > 0).long() * 0 + (sxs < 0).long() * 1)
++        Sdd = Sd[di]
++        stamp = (1 - ax) * (1 - ay) * S0[None] + ax * (1 - ay) * Sx + (1 - ax) * ay * Sy + ax * ay * Sdd
++        c19 = c19 + amp[:, None, None] * stamp
++        # recentre on the max within the central 5x5 (candidates are local maxima)
++        ctr = c19[:, RP - 2:RP + 3, RP - 2:RP + 3].reshape(c19.shape[0], -1)
++        am = torch.argmax(ctr, 1); oy = am // 5 - 2; ox = am % 5 - 2
++        o_ = torch.arange(-R, R + 1, device=z.device)
++        D = 2 * RP + 1
++        ind = (RP + oy[:, None, None] + o_[None, :, None]) * D + (RP + ox[:, None, None] + o_[None, None, :])
++        pos = torch.gather(c19.reshape(c19.shape[0], -1), 1, ind.reshape(c19.shape[0], -1)).reshape(-1, 2 * R + 1, 2 * R + 1)
++        okp = (pos[:, R, R] >= NZ) & (pos[:, R, R] < 0.97 * zc_)
++        pos = pos[okp][:Np]
++        # negatives: the map's own (sub-ceiling) peaks with z in [NZ, 7]
++        okn = (sc >= NZ) & (sc <= 7.0) & (sc < 0.97 * zc_)
++        ni = torch.nonzero(okn, as_tuple=True)[0]
++        if ni.numel() > Nn:
++            ni = ni[torch.from_numpy(rng_.choice(ni.numel(), Nn, replace=False)).to(ni.device)]
++        zpad2 = F.pad(z.float()[None, None], (R, R, R, R))[0, 0].reshape(-1)
++        neg = cnn_cut(zpad2, W + 2 * R, yy[ni] + R, xx[ni] + R, R)
++        nb_ = min(int(pos.shape[0]), int(neg.shape[0])); pos = pos[:nb_]; neg = neg[:nb_]   # balanced classes
++        if pos.shape[0] < 500 or neg.shape[0] < 500:
++            raise RuntimeError(f"too few samples pos {pos.shape[0]} neg {neg.shape[0]}")
++        X = torch.cat([cnn_norm(pos), cnn_norm(neg)]).float()
++        Y = torch.cat([torch.ones(pos.shape[0]), torch.zeros(neg.shape[0])]).float().to(z.device)
++        nn = torch.nn
++        model = nn.Sequential(nn.Conv2d(1, 8, 3), nn.ReLU(), nn.Conv2d(8, 16, 3), nn.ReLU(),
++                              nn.Conv2d(16, 16, 3), nn.ReLU(), nn.Flatten(), nn.Linear(16 * 9 * 9, 32), nn.ReLU(),
++                              nn.Linear(32, 1)).to(z.device)
++        # hold out 10% for validation
++        perm = torch.from_numpy(rng_.permutation(X.shape[0])).to(z.device)
++        nv = X.shape[0] // 10
++        Xv, Yv = X[perm[:nv]], Y[perm[:nv]]; Xt, Yt = X[perm[nv:]], Y[perm[nv:]]
++        opt = torch.optim.Adam(model.parameters(), lr=3e-3)
++        lossf = nn.BCEWithLogitsLoss()
++        NST = int(os.environ.get("TNO_NS_CNNSTEPS", "300")); BS = 256
++        bi = torch.from_numpy(rng_.integers(0, Xt.shape[0], (NST, BS))).to(z.device)
++        model.train()
++        for s_ in range(NST):
++            xb = Xt[bi[s_]]; yb = Yt[bi[s_]]
++            if s_ % 2:
++                xb = torch.flip(xb, (3,))
++            opt.zero_grad(); l_ = lossf(model(xb)[:, 0], yb); l_.backward(); opt.step()
++            if time.time() - T0 > deadline:
++                raise RuntimeError("deadline in CNN training")
++        model.eval()
++        with torch.no_grad():
++            lv = model(Xv)[:, 0]
++            accv = float(((lv > 0).float() == Yv).float().mean())
++            lt = model(Xt[:4096])[:, 0]
++            acct = float(((lt > 0).float() == Yt[:4096]).float().mean())
++            lossv = float(lossf(lv, Yv))
++        cnn_st["log"].append(f"acf1 {acf1:.3f} npos {pos.shape[0]} nneg {neg.shape[0]} loss_last {float(l_.detach()):.3f} "
++                             f"val_loss {lossv:.3f} val_acc {accv:.3f} train_acc {acct:.3f} t {time.time() - t0_:.1f}s")
++        return model
++    def cnn_top(z, yy, xx, sc, n, zc_):
++        """indices of the n peaks to keep (CNN-adjusted ranking; plain z ranking on any failure)"""
++        if CNN and not cnn_st["failed"] and sc.numel() > n:
++            try:
++                t0_ = time.time()
++                if cnn_st["model"] is None:
++                    cnn_st["model"] = cnn_train(z, yy, xx, sc, zc_)
++                m_ = cnn_st["model"]; R = CNN_R
++                zpad2 = F.pad(z.float()[None, None], (R, R, R, R))[0, 0].reshape(-1)
++                lg = []
++                with torch.no_grad():
++                    for b0 in range(0, int(sc.numel()), 16384):
++                        c_ = cnn_cut(zpad2, W + 2 * R, yy[b0:b0 + 16384] + R, xx[b0:b0 + 16384] + R, R)
++                        lg.append(m_(cnn_norm(c_).float())[:, 0])
++                lg = torch.clamp(torch.cat(lg), -4.0, 4.0)
++                adj = sc.float() + CNNA * lg
++                top = torch.topk(adj, n).indices
++                t0z = torch.topk(sc.float(), n).indices
++                mz = torch.zeros(sc.numel(), dtype=torch.bool, device=sc.device); mz[t0z] = True
++                nchg = int((~mz[top]).sum())
++                cnn_st["chg"].append((int(sc.numel()), n, nchg, round(float((lg > 0).float().mean()), 3),
++                                      round(float(sc[top].min()), 2)))
++                cnn_st["t"] += time.time() - t0_
++                if time.time() - T0 > deadline:
++                    cnn_st["failed"] = True
++                return top
++            except Exception as ex_:
++                cnn_st["failed"] = True
++                log_(f"night seeds: CNN scorer failed {repr(ex_)[:300]}")
++        return torch.topk(sc, n).indices
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1872,7 +2017,7 @@
+                     inc_ = torch.nonzero(~isc, as_tuple=True)[0]
+                     nf_ = CAP - int(ic_.numel())
+                     if inc_.numel() > nf_:
+-                        inc_ = inc_[torch.topk(sc[inc_], nf_).indices]
++                        inc_ = inc_[cnn_top(z, yy[inc_], xx[inc_], sc[inc_], nf_, zc_)]
+                     top = torch.cat([ic_, inc_])
+                     ceil_log.append((nc0_, int(ic_.numel()), int(inc_.numel()),
+                                      round(float(sc[inc_].min()), 2) if inc_.numel() else None))
+@@ -1895,7 +2040,12 @@
+                         keep[rest[np.argsort(-sn[rest])[:nf]]] = True
+                     top = torch.from_numpy(np.flatnonzero(keep)).to(yy.device)
+                 else:
+-                    top = torch.topk(sc, CAP).indices
++                    try:
++                        wk2_ = np.asarray(wf[idx], float)
++                        zc2_ = 5.0 * wk2_.sum() / math.sqrt(max((wk2_ ** 2).sum(), 1e-9))
++                    except Exception:
++                        zc2_ = 1e9
++                    top = cnn_top(z, yy, xx, sc, CAP, zc2_)
+                 yy, xx, sc = yy[top], xx[top], sc[top]
+             GI[-1].append(nm_i)
+             NMs[nm_i] = F.max_pool2d(z[None, None], 3, 1, 1)[0, 0].reshape(-1).half(); nm_i += 1
+@@ -1911,6 +2061,9 @@
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own
++    if cnn_st["log"] or cnn_st["chg"]:
++        log_(f"night seeds: CNN scorer (alpha {CNNA}) train {cnn_st['log']}; total {cnn_st['t']:.1f}s; "
++             f"(n_in, n_keep, n_changed_vs_z, frac_logit>0, min_kept_z) per map {cnn_st['chg']}")
+     if ceil_log:
+         log_(f"night seeds: ceiling thinning (n_ceil, kept_ceil, kept_sub, min_sub_z) per map {ceil_log}")
+     # sky unit vectors of night peaks

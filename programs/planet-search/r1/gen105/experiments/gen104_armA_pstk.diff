@@ -1,0 +1,421 @@
+diff -ru -x N $RSI_SANDBOX/r1/gen104/workspace/submission/stackd/finder.py sub/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen104/workspace/submission/stackd/finder.py	2026-11-06 00:46:50
++++ sub/stackd/finder.py	2026-11-06 04:55:14
+@@ -1156,6 +1156,81 @@
+             log(f"deep-window seeds (kind 3, outside the p null): {int(sdeep.sum())} of {len(sdeep)}")
+     except Exception as ex:
+         log("deep seed kinds failed:", ex)
++    # gen 103 (TNO_PSTK=1): pair-seeded all-exposure stack seeds, kind 4 (outside the p null), appended after all
++    # other seeds and interleaved with them in the refinement order.
++    if os.environ.get("TNO_PSTK", "0") == "1" and _PSTK.get("UA") is not None:
++        try:
++            tps0 = time.time()
++            PKEEP = int(os.environ.get("TNO_PSTK_K", "0") or 0) or (4000 if cuda else 1000)
++            ps_dl = min(budget * float(os.environ.get("TNO_PSTK_DL", os.environ.get("TNO_NS_DL", "0.80"))),
++                        (time.time() - T0) + float(os.environ.get("TNO_PSTK_F", "0.25")) * budget)
++            prow, pfr = pstk_seeds(torch, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H, ps_dl, PKEEP, log)
++            off_ = len(frames)
++            frames.extend(pfr)
++            PSs, psc = [], []
++            for r in prow:
++                s_, ep_ = to_state((r[0], r[1], r[2], r[3], r[4], r[5], r[6] + off_))
++                x = orbit.propagate(s_[:3], s_[3:], np.array([t_ep - ep_, t_ep - ep_ + 1e-3]))
++                st_ = np.r_[x[0], (x[1] - x[0]) / 1e-3]
++                if np.all(np.isfinite(st_)):
++                    PSs.append(st_); psc.append(r[0])
++            if PSs:
++                PSs = np.array(PSs)
++                if os.environ.get("TNO_PSTK_DUMP"):
++                    try:
++                        json.dump({"candidates": [dict(epoch_mjd=float(t_ep), state=[float(x) for x in PSs[j]],
++                                                       p=float(0.999 - 0.9 * j / max(1, len(PSs))), score=float(psc[j]))
++                                                  for j in range(len(PSs))]}, open(os.environ["TNO_PSTK_DUMP"] + ".all.json", "w"))
++                    except Exception as ex_:
++                        log("pstk dump failed:", repr(ex_)[:200])
++                fr_ = np.array([np.flatnonzero(night == u)[0] for u in nights_u])
++                occ = [set() for _ in fr_]
++                def pcells_(S_):
++                    uu = orbit.predict_dirs_b(S_, t_ep, t[fr_], obs[fr_])
++                    qq = uu @ TF0.T
++                    return (np.floor(qq[..., 0] / qq[..., 2] / (4 * PIX)).astype(np.int64),
++                            np.floor(qq[..., 1] / qq[..., 2] / (4 * PIX)).astype(np.int64))
++                def pmark_(kx_, ky_):
++                    for k_ in range(len(fr_)):
++                        for ddx in (-1, 0, 1):
++                            for ddy in (-1, 0, 1):
++                                occ[k_].add((kx_[k_] + ddx, ky_[k_] + ddy))
++                old_ = np.flatnonzero(skind <= 1) if len(skind) == len(states) else np.arange(len(Ls))
++                if len(old_):
++                    lx_, ly_ = pcells_(states[old_])
++                    for j in range(len(old_)):
++                        pmark_(lx_[j], ly_[j])
++                kx, ky = pcells_(PSs)
++                kp = []
++                # gen 104: a pstk track shares its 2 seeding peaks with any night seed built on the same pair, so the
++                # gen103 ">= 2 shared nights" dedup removed B bodies whose night seed had the wrong 3rd night
++                PDDN = int(os.environ.get("TNO_PSTK_DDN", "3"))
++                for j in range(len(PSs)):
++                    if sum(1 for k_ in range(len(fr_)) if (kx[j, k_], ky[j, k_]) in occ[k_]) >= PDDN:
++                        continue
++                    kp.append(j); pmark_(kx[j], ky[j])
++                    if len(kp) >= PKEEP:
++                        break
++                PSs = PSs[kp]; psc = np.array(psc)[kp]
++                if os.environ.get("TNO_PSTK_DUMP"):
++                    try:
++                        json.dump({"candidates": [dict(epoch_mjd=float(t_ep), state=[float(x) for x in PSs[j]],
++                                                       p=float(0.999 - 0.9 * j / max(1, len(PSs))), score=float(psc[j]))
++                                                  for j in range(len(PSs))]}, open(os.environ["TNO_PSTK_DUMP"], "w"))
++                    except Exception as ex_:
++                        log("pstk dump failed:", repr(ex_)[:200])
++                if len(skind) != len(states):
++                    skind = np.r_[np.zeros(len(Ls), int), np.full(len(states) - len(Ls), 2)]
++                states = np.vstack([states, PSs]) if len(states) else PSs
++                skind = np.r_[skind, np.full(len(PSs), 4)]
++                seed_sc = np.r_[seed_sc, -np.arange(len(PSs), dtype=float) * float(os.environ.get("TNO_PSTK_ILV", "1.0")) - 0.75]
++                log(f"pstk: {len(PSs)} seeds (kind 4) after dedup from {len(prow)} rows, scores "
++                    f"{psc[:3].round(2).tolist() if len(psc) else []} .. {float(psc[-1]) if len(psc) else 0:.2f}, "
++                    f"in {time.time() - tps0:.1f}s")
++        except Exception as ex:
++            import traceback
++            traceback.print_exc()
++            log("pstk failed:", repr(ex)[:300])
+     mflat = maps.reshape(N, -1)
+     covf = cov.reshape(N, -1)
+     nights_idx = [np.flatnonzero(night == u) for u in nights_u]
+@@ -1651,7 +1726,7 @@
+                 log("bright-pair failed:", repr(ex)[:300])
+         try:
+             rk_ = np.array(rkd)
+-            log(f"refined by kind (linker/night/window/deep): {[int((rk_ == k_).sum()) for k_ in range(4)]}; "
++            log(f"refined by kind (linker/night/window/deep/pstk): {[int((rk_ == k_).sum()) for k_ in range(5)]}; "
+                 f"window-seed median {np.median(np.array(rsc)[rk_ == 2]) if (rk_ == 2).any() else 0:.2f}")
+         except Exception:
+             pass
+@@ -1749,6 +1824,271 @@
+     return C, torch.cat(outV).cpu().numpy(), torch.cat(outK).cpu().numpy()
+ 
+ 
++_PSTK = {}   # gen 103 (TNO_PSTK): side channel night_seeds -> pstk_seeds (low-threshold night peaks)
++
++
++def pstk_seeds(torch, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H, deadline, KEEP, log_):
++    """gen 103 (TNO_PSTK): pair-seeded all-exposure stack.  Every pair of low-threshold (z >= PSTK_Z) night co-add
++    peaks on two nights consistent with a bound TNO rate at distance d (d-frame, linear motion) fixes a track; the
++    track is read from EVERY per-exposure map and scored by the weighted, winsorized S/N of the exposures of the
++    OTHER nights only (held-out: the seeding nights were selected and are biased).  No third-night peak needed.
++    Returns rows (score, d, vx, vy, px, py, local frame index, 200) and frames (TD, tref, oref)."""
++    P_ = _PSTK
++    if not P_ or "UA" not in P_:
++        return [], []
++    f32 = torch.float32
++    tN, oN, nu = P_["tN"], P_["oN"], P_["nu"]
++    nN = len(nu)
++    UA, GI, GC = P_["UA"], P_["GI"], P_["GC"]
++    WCL = float(os.environ.get("TNO_PSTK_WCL", "4.0"))
++    TOL = float(os.environ.get("TNO_PSTK_TOL", "2.5")) * ARCR
++    VRAD = float(os.environ.get("TNO_PSTK_VRAD", "0.45"))   # gen 104: 0.75 -> 0.45 (near-circular prior)
++    DTMIN = float(os.environ.get("TNO_PSTK_DTMIN", "0.5"))
++    MAXE = int(os.environ.get("TNO_PSTK_MAXE", "0") or 0) or (4_000_000 if str(dev).startswith("cuda") else 1_500_000)
++    PER_D = 4 * KEEP
++    BAND = os.environ.get("TNO_PSTK_BAND", "1") != "0"      # gen 104: y-banded pair search (0 = gen103 x strip)
++    nenum = [0]
++    N = len(t)
++    nmap = {}
++    for k, u in enumerate(nu):
++        nmap[u] = k
++    fn = np.array([nmap[n] for n in night])           # night index of every frame
++    fnt = torch.as_tensor(fn, device=dev)
++    wft = torch.as_tensor(np.asarray(wf, np.float64), dtype=f32, device=dev)
++    obt = torch.as_tensor(np.asarray(obs, np.float64), dtype=f32, device=dev)
++    TFt = torch.as_tensor(TF0, dtype=f32, device=dev)
++    mflat = maps.reshape(-1); cflat = cov.reshape(-1)
++    tref = 0.5 * (tN.min() + tN.max()); oref = oN.mean(0)
++    tt_ = torch.as_tensor(np.asarray(t, np.float64) - tref, dtype=f32, device=dev)
++    A_ = np.stack([np.ones_like(tN), tN - tref], 1)
++    coef, *_ = np.linalg.lstsq(A_, oN, rcond=None)
++    r_ = oN - A_ @ coef; r_ = r_ - np.outer(r_ @ TF0[2], TF0[2])
++    rmax = max(np.sqrt((r_ ** 2).sum(1)).max(), 1e-6)
++    step = float(os.environ.get("TNO_PSTK_DSTEP", "6.0")) * ARCR / rmax   # gen 104: 3 -> 6 (41 distances, CEM refines d)
++    lo = 1 / float(os.environ.get("TNO_NS_DMAX", "75")); hi = 1 / float(os.environ.get("TNO_NS_DMIN", "28"))
++    nst = max(1, int(math.ceil((hi - lo) / step)))
++    dg = sorted([1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)], key=lambda d: abs(math.log(d / 42.0)))
++    z0 = TF0[2]
++    pole = np.array([0, -math.sin(EPS), math.cos(EPS)])
++    pairs = [(a, b) for a in range(nN) for b in range(a + 1, nN) if tN[b] - tN[a] >= DTMIN]
++    best = {}       # track key -> row
++    frames = []
++    nhyp = 0; nd = 0
++    t0_ = time.time()
++
++    Qn_ = []
++    # gen 104: pair enumeration on the CPU (cKDTree) instead of the GPU -- on MPS every new tensor shape compiles a graph,
++    # which made the GPU pair search ~7 s per distance; default: CPU unless cuda.  Scoring stays on the device in fixed-size
++    # (padded) chunks.
++    CPUP = os.environ.get("TNO_PSTK_CPUP", "0" if str(dev).startswith("cuda") else "1") != "0"
++    CHK = int(os.environ.get("TNO_PSTK_CHUNK", "262144"))
++    from scipy.spatial import cKDTree
++
++    def geom_(d):
++        b_ = oref @ z0; rho = -b_ + math.sqrt(b_ * b_ - oref @ oref + d * d)
++        w0 = (oref + rho * z0) / d
++        TD = tframe(w0)
++        vmax = math.sqrt(2 * GM / d) / d
++        vc = np.cross(pole, w0); vc = vc / np.linalg.norm(vc) * math.sqrt(GM / d)
++        vcx, vcy = (TD[0] @ vc) / d, (TD[1] @ vc) / d
++        vcs = math.hypot(vcx, vcy)
++        gsel = [GI[k][int(np.argmin(np.abs(GC[k] - 1 / d)))] for k in range(nN)]
++        Q = []
++        Qn_.clear()
++        for k in range(nN):
++            o = oN[k]; u = UA[gsel[k]]
++            bb = u @ o; rr = -bb + np.sqrt(np.maximum(bb * bb - o @ o + d * d, 0))
++            X = (o[None] + rr[:, None] * u) / d
++            q = X @ TD.T
++            Q.append(torch.as_tensor(np.stack([q[:, 0] / q[:, 2], q[:, 1] / q[:, 2]], 1), dtype=f32, device=dev))
++            Qn_.append(np.stack([q[:, 0] / q[:, 2], q[:, 1] / q[:, 2]], 1))
++        return TD, vmax, vcx, vcy, vcs, Q
++
++    def score_(d, TDt, p0, v, ha, hb):
++        K = p0.shape[0]
++        num = torch.zeros(K, dtype=f32, device=dev)
++        den = torch.zeros(K, dtype=f32, device=dev)
++        nng = torch.zeros((K, nN), dtype=torch.bool, device=dev)
++        for n in range(N):
++            hm = (ha != int(fn[n])) & (hb != int(fn[n]))
++            P = p0 + v * tt_[n]
++            wv = TDt[2][None] + P[:, 0:1] * TDt[0][None] + P[:, 1:2] * TDt[1][None]
++            X = d * wv / torch.linalg.norm(wv, dim=1, keepdim=True) - obt[n][None]
++            q = X @ TFt.T
++            ix = torch.round((q[:, 0] / q[:, 2] - x0) / PIX).long()
++            iy = torch.round((q[:, 1] / q[:, 2] - y0) / PIX).long()
++            okp = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
++            lin = torch.where(okp, iy * W + ix, torch.zeros_like(ix)) + n * (H * W)
++            cv_ = cflat[lin] & okp & hm
++            vv = torch.where(cv_, mflat[lin].float().clamp(-3.0, WCL), torch.zeros_like(num))
++            num += vv * wft[n]; den += cv_.float() * wft[n] ** 2
++            nng[:, int(fn[n])] |= cv_
++        sc = num / torch.sqrt(torch.clamp(den, min=1e-3))
++        sc = torch.where(nng.sum(1) >= 2, sc, torch.full_like(sc, -9.0))
++        return sc
++
++    tim = [0.0]
++    for d in dg:
++        if time.time() - T0 > deadline:
++            log_("pstk: deadline in distance loop")
++            break
++        TD, vmax, vcx, vcy, vcs, Q = geom_(d)
++        TDt = torch.as_tensor(TD, dtype=f32, device=dev)
++        vct = torch.tensor([vcx, vcy], dtype=f32, device=dev)
++        topS, topC = [], []
++        bufP, bufV, bufA, bufB = [], [], [], []
++        nbuf = [0]
++
++        def flush_():
++            if not bufP:
++                return
++            p0 = torch.cat(bufP); v = torch.cat(bufV); ha = torch.cat(bufA); hb = torch.cat(bufB)
++            bufP.clear(); bufV.clear(); bufA.clear(); bufB.clear(); nbuf[0] = 0
++            K = p0.shape[0]
++            ts_ = time.time()
++            if CPUP and K > 0:      # fixed-size padded chunks (no per-shape recompiles on MPS)
++                npad = (-K) % CHK
++                if npad:
++                    p0 = torch.cat([p0, p0[:1].repeat(npad, 1)]); v = torch.cat([v, v[:1].repeat(npad, 1)])
++                    ha = torch.cat([ha, ha[:1].repeat(npad)]); hb = torch.cat([hb, hb[:1].repeat(npad)])
++                sc = torch.cat([score_(d, TDt, p0[c0:c0 + CHK], v[c0:c0 + CHK], ha[c0:c0 + CHK], hb[c0:c0 + CHK])
++                                for c0 in range(0, K + npad, CHK)])[:K]
++                p0 = p0[:K]; v = v[:K]
++            else:
++                sc = score_(d, TDt, p0, v, ha, hb)
++            tv, ti = torch.topk(sc, min(PER_D, K))
++            topS.append(tv); topC.append(torch.cat([p0[ti], v[ti]], 1))
++            float(tv[0]); tim[0] += time.time() - ts_
++            if len(topS) > 4:
++                S_ = torch.cat(topS); C_ = torch.cat(topC)
++                tv, ti = torch.topk(S_, min(PER_D, len(S_)))
++                topS[:] = [tv]; topC[:] = [C_[ti]]
++
++        TB = [None] * nN
++        for a, b in pairs:
++            if time.time() - T0 > deadline:
++                break
++            Qa, Qb = Q[a], Q[b]
++            if len(Qa) == 0 or len(Qb) == 0:
++                continue
++            dt = float(tN[b] - tN[a])
++            R = dt * (VRAD * vcs) + TOL
++            if CPUP:
++                if TB[b] is None:
++                    TB[b] = cKDTree(Qn_[b])
++                Qa_n = Qn_[a]
++                sm = cKDTree(Qa_n + dt * np.array([vcx, vcy])[None]).sparse_distance_matrix(TB[b], R, output_type="ndarray")
++                ia, ib = sm["i"].astype(np.int64), sm["j"].astype(np.int64)
++                nenum[0] += len(ia)
++                v = (Qn_[b][ib] - Qa_n[ia]) / dt
++                okv = np.hypot(v[:, 0], v[:, 1]) <= vmax + TOL / dt
++                ia, v = ia[okv], v[okv]
++                K = len(ia)
++                if K == 0:
++                    continue
++                nhyp += K
++                bufP.append(torch.as_tensor(Qa_n[ia] + v * float(tref - tN[a]), dtype=f32, device=dev))
++                bufV.append(torch.as_tensor(v, dtype=f32, device=dev))
++                bufA.append(torch.full((K,), a, dtype=torch.long, device=dev))
++                bufB.append(torch.full((K,), b, dtype=torch.long, device=dev))
++                nbuf[0] += K
++                if nbuf[0] >= MAXE:
++                    flush_()
++                continue
++            ctr = Qa + dt * vct[None]
++            if BAND:
++                # gen 104: y-banded candidate search (bands of height R; int64 key = band * 2^31 + quantised x), so
++                # each Qa point enumerates 3 bands x 2R instead of a full-height x strip
++                qx_ = TOL * 0.25
++                xmn = float(torch.minimum(Qa[:, 0].min(), Qb[:, 0].min()).item()) - 2 * R - 1e-6
++                ymn = float(torch.minimum(Qa[:, 1].min(), Qb[:, 1].min()).item()) - 2 * R - 1e-6
++                kbb = torch.floor((Qb[:, 1] - ymn) / R).long()
++                keyb = kbb * (2 ** 31) + torch.floor((Qb[:, 0] - xmn) / qx_).long()
++                keys_, ordb = torch.sort(keyb)
++                Qbs = Qb[ordb]
++                kba = torch.floor((ctr[:, 1] - ymn) / R).long()
++                xl_ = torch.floor((ctr[:, 0] - R - xmn) / qx_).long()
++                xh_ = torch.floor((ctr[:, 0] + R - xmn) / qx_).long() + 1
++                los, his = [], []
++                for dyb in (-1, 0, 1):
++                    bb_ = (kba + dyb) * (2 ** 31)
++                    los.append(torch.searchsorted(keys_, (bb_ + xl_).contiguous()))
++                    his.append(torch.searchsorted(keys_, (bb_ + xh_).contiguous()))
++                lo_ = torch.cat(los); hi_ = torch.cat(his)
++                ctr = ctr.repeat(3, 1); Qa = Qa.repeat(3, 1)
++            else:
++                xs, ordb = torch.sort(Qb[:, 0].contiguous())
++                Qbs = Qb[ordb]
++                lo_ = torch.searchsorted(xs, (ctr[:, 0] - R).contiguous())
++                hi_ = torch.searchsorted(xs, (ctr[:, 0] + R).contiguous())
++            cnt = hi_ - lo_
++            cs = torch.cumsum(cnt, 0)
++            tot = int(cs[-1].item()) if len(cs) else 0
++            nenum[0] += tot
++            if tot == 0:
++                continue
++            nch = max(1, int(math.ceil(tot / MAXE)))
++            bounds = torch.searchsorted(cs, torch.linspace(0, tot, nch + 1, device=dev)[1:-1].to(cs.dtype).contiguous())
++            edges = [0] + [int(x) + 1 for x in bounds.tolist()] + [len(Qa)]
++            for e0, e1 in zip(edges[:-1], edges[1:]):
++                if e1 <= e0:
++                    continue
++                c_ = cnt[e0:e1]
++                n_ = int(c_.sum().item())
++                if n_ == 0:
++                    continue
++                ia = torch.repeat_interleave(torch.arange(e0, e1, device=dev), c_)
++                st = torch.cumsum(c_, 0) - c_
++                ib = lo_[e0:e1].repeat_interleave(c_) + (torch.arange(n_, device=dev) - st.repeat_interleave(c_))
++                dlt = Qbs[ib] - ctr[ia]
++                ok = (dlt * dlt).sum(1) <= R * R
++                ia, ib = ia[ok], ib[ok]
++                v = (Qbs[ib] - Qa[ia]) / dt
++                okv = torch.sqrt((v * v).sum(1)) <= vmax + TOL / dt
++                ia, v = ia[okv], v[okv]
++                K = int(ia.numel())
++                if K == 0:
++                    continue
++                nhyp += K
++                bufP.append(Qa[ia] + v * float(tref - tN[a])); bufV.append(v)
++                bufA.append(torch.full((K,), a, dtype=torch.long, device=dev))
++                bufB.append(torch.full((K,), b, dtype=torch.long, device=dev))
++                nbuf[0] += K
++                if nbuf[0] >= MAXE:
++                    flush_()
++        flush_()
++        nd += 1
++        if not topS:
++            continue
++        S_ = torch.cat(topS); C_ = torch.cat(topC)
++        tv, ti = torch.topk(S_, min(PER_D, len(S_)))
++        Sn = tv.cpu().numpy().astype(np.float64); Cn = C_[ti].cpu().double().numpy()
++        # track key: predicted pixel cells (8 px) on the first and last night (dedups pairs / distances of one track)
++        kx = []
++        for k in (0, nN - 1):
++            P = Cn[:, :2] + Cn[:, 2:] * (tN[k] - tref)
++            wv = TD[2][None] + P[:, 0:1] * TD[0][None] + P[:, 1:2] * TD[1][None]
++            X = d * wv / np.linalg.norm(wv, axis=1)[:, None] - oN[k][None]
++            q = X @ TF0.T
++            kx.append(np.floor((q[:, 0] / q[:, 2] - x0) / PIX / 8).astype(np.int64))
++            kx.append(np.floor((q[:, 1] / q[:, 2] - y0) / PIX / 8).astype(np.int64))
++        fi = len(frames); frames.append((TD, tref, oref))
++        for j in range(len(Sn)):
++            if Sn[j] <= -8:
++                continue
++            key = (int(kx[0][j]), int(kx[1][j]), int(kx[2][j]), int(kx[3][j]))
++            if key not in best or best[key][0] < Sn[j]:
++                best[key] = (float(Sn[j]), d, float(Cn[j, 2]), float(Cn[j, 3]), float(Cn[j, 0]), float(Cn[j, 1]), fi, 200)
++        if len(best) > 20 * KEEP:
++            kb_ = sorted(best.items(), key=lambda it: -it[1][0])[:8 * KEEP]
++            best.clear(); best.update(kb_)
++    rows = sorted(best.values(), key=lambda r: -r[0])[:4 * KEEP]
++    log_(f"pstk: {nd}/{len(dg)} distances, {len(pairs)} night pairs, {nhyp / 1e6:.1f}M hypotheses, "
++         f"{len(best)} track keys, top scores {[round(r[0], 2) for r in rows[:5]]}, in {time.time() - t0_:.1f}s "
++         f"(scoring {tim[0]:.1f}s; {nenum[0] / 1e6:.1f}M enumerated; VRAD {VRAD}, grid {len(dg)}, band {BAND}, cpu pairs {CPUP})")
++    return rows, frames
++
++
+ def night_seeds(torch, F, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H, deadline, NS, log_):
+     """gen 31 (v2): per-night co-add seeds.  Each night's frames are co-added (weighted, S/N units), local maxima
+     with night z >= NZ are linked across nights: for each distance d (heliocentric d-frame, motion linear), a pair
+@@ -1850,6 +2190,12 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    PSTK_ON = os.environ.get("TNO_PSTK", "0") == "1"
++    PSTK_Z = float(os.environ.get("TNO_PSTK_Z", "3.0"))
++    PSTK_CAP = int(os.environ.get("TNO_PSTK_CAP", "0") or 0) or (12000 if str(dev).startswith("cuda") else 4000)
++    _PSTK.clear()
++    if PSTK_ON:
++        _PSTK.update(PK=[], Z=[], n0=[])
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1928,6 +2274,27 @@
+                 else:
+                     top = torch.topk(sc, CAP).indices
+                 yy, xx, sc = yy[top], xx[top], sc[top]
++            if PSTK_ON:
++                try:   # gen 103 (TNO_PSTK): low-threshold night peaks for the pair-seeded all-exposure stack
++                    pk2 = (z == mp) & (z >= PSTK_Z)
++                    y2, x2 = torch.nonzero(pk2, as_tuple=True)
++                    s2 = z[y2, x2]
++                    if st_cnt is not None and s2.numel():
++                        mv2 = (st_cnt[y2, x2] - st_own[k_][y2, x2].float()) < STN
++                        y2, x2, s2 = y2[mv2], x2[mv2], s2[mv2]
++                    if CEIL and s2.numel():
++                        wk2 = np.asarray(wf[idx], float)
++                        zc2 = 5.0 * wk2.sum() / math.sqrt(max((wk2 ** 2).sum(), 1e-9))
++                        mv2 = s2 < 0.97 * zc2      # ceiling plateaus are bright sources, not faint-body seeds
++                        y2, x2, s2 = y2[mv2], x2[mv2], s2[mv2]
++                    if s2.numel() > PSTK_CAP:
++                        tp2 = torch.topk(s2, PSTK_CAP).indices
++                        y2, x2, s2 = y2[tp2], x2[tp2], s2[tp2]
++                    _PSTK["PK"].append(np.stack([x2.cpu().numpy(), y2.cpu().numpy()], 1).astype(np.float64))
++                    _PSTK["Z"].append(s2.float().cpu().numpy()); _PSTK["n0"].append(int(pk2.sum().item()))
++                except Exception as ex_:
++                    log_(f"pstk: peak extraction failed {repr(ex_)[:200]}"); _PSTK["PK"].append(np.zeros((0, 2)))
++                    _PSTK["Z"].append(np.zeros(0, np.float32)); _PSTK["n0"].append(0)
+             GI[-1].append(nm_i)
+             NMs[nm_i] = F.max_pool2d(z[None, None], 3, 1, 1)[0, 0].reshape(-1).half(); nm_i += 1
+             del z, mp, pk
+@@ -1950,6 +2317,13 @@
+         u = TF0[2][None] + xi[:, None] * TF0[0][None] + eta[:, None] * TF0[1][None]
+         return u / np.linalg.norm(u, axis=1)[:, None]
+     UA = [sky_u(P) for P in PK]
++    if PSTK_ON:
++        try:
++            _PSTK.update(UA=[sky_u(P) for P in _PSTK["PK"]], GI=[list(g) for g in GI], GC=[np.array(g) for g in GC],
++                         tN=np.array(tN), oN=np.array(oN), nu=nu)
++            log_(f"pstk: low peaks (z >= {PSTK_Z}) per map found {_PSTK['n0']}, kept {[len(p) for p in _PSTK['PK']]}")
++        except Exception as ex_:
++            log_(f"pstk: sky_u failed {repr(ex_)[:200]}"); _PSTK.clear()
+     if os.environ.get("TNO_NS_DUMP"):
+         try:
+             nmap = np.concatenate([np.full(int(Gk[k]), k) for k in range(len(nu))])

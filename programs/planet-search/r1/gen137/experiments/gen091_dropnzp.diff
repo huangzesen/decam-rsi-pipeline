@@ -1,0 +1,13 @@
+--- stackd/finder.py	2026-11-05 06:01:44
++++ ../../tmp/armE/stackd/finder.py	2026-11-05 13:27:38
+@@ -69,6 +69,10 @@
+     F = torch.nn.functional
+     sdir = a.scenario
+     rows = list(csv.DictReader(open(os.path.join(sdir, "exposures.csv"))))
++    if os.environ.get("TNO_DROPNZP", "0") != "0":   # gen 91 diagnostic: drop exposures with empty magzero
++        _r = [r for r in rows if str(r.get("magzero", "")).strip() not in ("", "nan")]
++        if len(_r) >= 4:
++            rows = _r
+     meta = json.load(open(os.path.join(sdir, "meta.json")))
+     t_all = np.array([float(r["mjd_mid"]) for r in rows])
+     night_all = np.floor(t_all - 0.5).astype(int)

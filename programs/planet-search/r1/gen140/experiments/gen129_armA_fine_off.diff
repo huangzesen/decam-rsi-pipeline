@@ -1,0 +1,85 @@
+diff -ru -x experiments -x __pycache__ base/stackd/fstk.py armA/stackd/fstk.py
+--- base/stackd/fstk.py	2026-11-08 00:29:16
++++ armA/stackd/fstk.py	2026-11-08 00:45:54
+@@ -56,15 +56,36 @@
+     ts = t[sel]; tref = 0.5 * (ts.min() + ts.max()); mdt = max(ts.max() - tref, 0.05)
+     dv = 1.0 / mdt
+     oref = obs[sel].mean(0)
+-    # 2" pooled, winsorized maps
+-    sm_ = []
+-    for i_ in range(0, N, 4):
+-        a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
+-        if DCLIP > 0:
+-            a_ = a_.clamp_(-max(DCLIP, RCLIP) if RS else -DCLIP, max(DCLIP, RCLIP) if RS else DCLIP)
+-        sm_.append(a_.half())
+-    smaps = torch.cat(sm_, 0); del sm_
+-    H2, W2 = smaps.shape[1:]
++    # gen 129 (TNO_FSTK_FINE, default 0 = gen128; 1 = on, measured neutral, see NOTES): warp each frame from a STRIDE-1 2x2 max-pool of the 1" map
++    # (window i covers 1" px i, i+1, centre i+0.5) instead of the stride-2 2" pool, so the nearest-neighbour sample is
++    # within +-0.25 canvas cell of the needed position instead of +-0.5.  Same per-cell noise distribution (2x2 max).
++    FINE = os.environ.get("TNO_FSTK_FINE", "0") == "1"
++    FINE_MB = float(os.environ.get("TNO_FSTK_FINE_MB", "6000"))   # precompute the stride-1 maps only under this size
++    smaps = smaps1 = None
++    if FINE:
++        LIM_ = max(DCLIP, RCLIP) if RS else DCLIP
++        H1, W1 = maps.shape[1] - 1, maps.shape[2] - 1
++
++        def _src1(i_):
++            a_ = F.max_pool2d(maps[i_:i_ + 1].float()[None], 2, 1)[0, 0]
++            return a_.clamp_(-LIM_, LIM_) if DCLIP > 0 else a_
++        H2, W2 = maps.shape[1] // 2, maps.shape[2] // 2      # canvas size as the stride-2 path
++        if N * H1 * W1 * 2 < FINE_MB * 1e6:
++            try:
++                smaps1 = torch.stack([_src1(i_).half() for i_ in range(N)])
++            except Exception:
++                smaps1 = None
++        log(f"fstk fine: stride-1 2x2 max source {W1}x{H1}, {'precomputed' if smaps1 is not None else 'per frame'}")
++    else:
++        # 2" pooled, winsorized maps
++        sm_ = []
++        for i_ in range(0, N, 4):
++            a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
++            if DCLIP > 0:
++                a_ = a_.clamp_(-max(DCLIP, RCLIP) if RS else -DCLIP, max(DCLIP, RCLIP) if RS else DCLIP)
++            sm_.append(a_.half())
++        smaps = torch.cat(sm_, 0); del sm_
++        H2, W2 = smaps.shape[1:]
+     # distance grid (dgrid_deep step logic)
+     o = obs[sel]; tt = ts - tref
+     A = np.stack([np.ones_like(tt), tt], 1)
+@@ -209,7 +230,10 @@
+                     Dm3 = None
+             for k_, n in enumerate(sel):
+                 rows_ = []
+-                src_ = smaps[k_].float()
++                if FINE:
++                    src_ = smaps1[k_].float() if smaps1 is not None else _src1(k_)
++                else:
++                    src_ = smaps[k_].float()
+                 for y0_ in range(0, HD, 1024):
+                     gy_ = gyd[y0_:y0_ + 1024]
+                     Wd = TD_t[2][None, None] + gxd[None, :, None] * TD_t[0][None, None] + gy_[:, None, None] * TD_t[1][None, None]
+@@ -217,8 +241,12 @@
+                     X = d * Wd - torch.tensor(obs[n] - 0.0, dtype=torch.float32, device=dev)
+                     q = X @ TF0_t.T
+                     sx = q[..., 0] / q[..., 2]; sy = q[..., 1] / q[..., 2]
+-                    ux = (sx - x0) / (2 * PIX) - 0.25; uy = (sy - y0) / (2 * PIX) - 0.25
+-                    grid = torch.stack([2 * ux / (W2 - 1) - 1, 2 * uy / (H2 - 1) - 1], -1)[None]
++                    if FINE:   # 1" px i centred at u1 = i; stride-1 window index = u1 - 0.5
++                        ux = (sx - x0) / PIX - 0.5; uy = (sy - y0) / PIX - 0.5
++                        grid = torch.stack([2 * ux / (W1 - 1) - 1, 2 * uy / (H1 - 1) - 1], -1)[None]
++                    else:
++                        ux = (sx - x0) / (2 * PIX) - 0.25; uy = (sy - y0) / (2 * PIX) - 0.25
++                        grid = torch.stack([2 * ux / (W2 - 1) - 1, 2 * uy / (H2 - 1) - 1], -1)[None]
+                     rows_.append(F.grid_sample(src_[None, None], grid, mode="nearest",
+                                                padding_mode="zeros", align_corners=True)[0, 0].half())
+                     del Wd, X, q, sx, sy, ux, uy, grid
+@@ -531,7 +559,7 @@
+                 break
+             continue
+         nfail = 0
+-    del smaps
++    smaps = smaps1 = None
+     log(f"fstk done: {ntot} hypotheses, kernel {tconv:.1f}s ({ntot / max(tconv, 1e-6):.0f} hyp/s), {len(rows_out)} rows, "
+         f"{time.time() - t_all0:.1f}s total")
+     return rows_out, frames_out

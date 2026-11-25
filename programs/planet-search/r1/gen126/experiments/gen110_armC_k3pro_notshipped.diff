@@ -1,0 +1,59 @@
+diff -ruN -x __pycache__ $RSI_SANDBOX/r1/gen110/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen110/workspace/submission/stackd/finder.py	2026-11-06 14:56:50
++++ submission/stackd/finder.py	2026-11-06 16:51:46
+@@ -1826,6 +1826,55 @@
+                 import traceback
+                 traceback.print_exc()
+                 log("bright-pair failed:", repr(ex)[:300])
++        # gen 110 (arm C, TNO_K3PRO = max promoted per scenario; 0 = gen109): fstk-seeded (kind 3) tracks whose
++        # clipped-stack z (to_cands "zc") clearly exceeds the null and whose clipped per-night stacks are positive on
++        # >= K3N covered nights (and >= K3F of covered), currently at stackd rank >= K3MINR, are moved to stackd rank K3RANK (order only: the scenario's sorted p values are kept),
++        # so a weight-4 body found only by fstk reaches the wrapper's top ranks instead of rank ~38.
++        K3PRO = int(float(os.environ.get("TNO_K3PRO", "0") or 0))
++        K3LOG = os.environ.get("TNO_K3LOG", "0") != "0"
++        if (K3PRO > 0 or K3LOG) and RCLIP > 0 and len(cands) >= 2:
++            try:
++                K3Z = float(os.environ.get("TNO_K3Z", "3.6"))
++                K3MINR = int(float(os.environ.get("TNO_K3MINR", "25")))   # only tracks that are not already near the top
++                K3N = int(float(os.environ.get("TNO_K3N", "3")))
++                K3F = float(os.environ.get("TNO_K3F", "0.6"))
++                K3L = float(os.environ.get("TNO_K3L", "-99"))
++                K3RANK = int(float(os.environ.get("TNO_K3RANK", "2")))
++                cands = sorted(cands, key=lambda c_: -c_["p"])
++                jk = [j for j, c_ in enumerate(cands) if np.isfinite(float(c_.get("zc", -np.inf)))]
++                if jk:
++                    vk_, ck_ = score_states(np.array([cands[j]["state"] for j in jk], float))
++                    vk_ = np.where(ck_, np.minimum(vk_, RCLIP), 0.0).astype(np.float64)
++                    num_ = vk_ * wf[None]; den_ = ck_ * (wf ** 2)[None]
++                    Nt_, Dt_ = num_.sum(1), den_.sum(1)
++                    ncv_ = np.zeros(len(jk), int); npo_ = np.zeros(len(jk), int); lo_ = np.full(len(jk), np.inf)
++                    for idx in nights_idx:
++                        cv_ = ck_[:, idx].any(1)
++                        nk_ = num_[:, idx].sum(1); dk_ = den_[:, idx].sum(1)
++                        ncv_ += cv_; npo_ += cv_ & (nk_ > 0)
++                        lo_ = np.where(cv_, np.minimum(lo_, (Nt_ - nk_) / np.sqrt(np.maximum(Dt_ - dk_, 1e-3))), lo_)
++                    elig = []
++                    for q_, j in enumerate(jk):
++                        zc0 = float(cands[j]["zc"])
++                        ok_ = (j >= K3MINR and zc0 >= K3Z and npo_[q_] >= K3N and npo_[q_] >= K3F * ncv_[q_] and lo_[q_] >= K3L)
++                        if ok_:
++                            elig.append((zc0, j))
++                        if K3LOG and zc0 >= 2.5:
++                            log(f"k3: rank {j} p {cands[j]['p']:.3f} zc {zc0:.2f} nights pos/cov {npo_[q_]}/{ncv_[q_]} "
++                                f"lono {lo_[q_]:.2f} r {np.linalg.norm(cands[j]['state'][:3]):.1f} elig {int(ok_)}")
++                    nel_ = len(elig)
++                    elig = sorted(elig, reverse=True)[:K3PRO]
++                    pro = [j for _, j in elig if j > K3RANK]
++                    if pro:
++                        ps_ = [float(c_["p"]) for c_ in cands]
++                        rest_ = [c_ for j, c_ in enumerate(cands) if j not in set(pro)]
++                        order_ = rest_[:K3RANK] + [dict(cands[j], k3pro=1) for j in pro] + rest_[K3RANK:]
++                        cands = [dict(c_, p=p_) for c_, p_ in zip(order_, ps_)]
++                        write_out(a.out, cands)
++                    log(f"k3pro: {len(jk)} kind-3 candidates, {nel_} eligible (zc >= {K3Z}, rank >= {K3MINR}), {len(pro)} promoted to rank {K3RANK} "
++                        f"(from ranks {[j for _, j in elig]}, zc {[round(z_, 2) for z_, _ in elig]})")
++            except Exception as ex:
++                log("k3pro failed:", repr(ex)[:300])
+         try:
+             rk_ = np.array(rkd)
+             log(f"refined by kind (linker/night/window/deep/pstk): {[int((rk_ == k_).sum()) for k_ in range(5)]}; "

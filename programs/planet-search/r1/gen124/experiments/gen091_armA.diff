@@ -1,0 +1,51 @@
+--- workspace/submission/finder.py	2026-11-05 01:43:25
++++ tmp/armA/finder.py	2026-11-05 13:06:56
+@@ -204,6 +204,8 @@
+ 
+ 
+ def merge(A, B, night_t, night_o):
++    A0 = [dict(c) for c in A]
++    B0 = [dict(c) for c in B]
+     A = [dict(c, src="L") for c in A if valid(c)]
+     B = [dict(c, src="S") for c in B if valid(c)]
+     for c in B:
+@@ -211,7 +213,7 @@
+     if not B:
+         return dedup_sky(A, night_t, night_o)
+     ua, ub = tracks(A, night_t, night_o), tracks(B, night_t, night_o)
+-    need = min(3, len(night_t))
++    need = min(MATCH_NEED, len(night_t))
+     keepB = np.ones(len(B), bool)
+     nmatch = nadopt = 0
+     if len(A):
+@@ -241,10 +243,21 @@
+                             f"per-night sep {np.round(sep, 2).tolist()}\"")
+     log(f"merge: {len(A)} linker, {len(B)} stack, {nmatch} stack candidates matched a linker one, {nadopt} stk states adopted")
+     allc = A + [c for c, k in zip(B, keepB) if k]
++    if os.environ.get("TNO_MERGE_DUMP"):
++        try:
++            def _j(cs):
++                return [{k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in c.items()
++                         if isinstance(v, (int, float, str, list, bool, np.ndarray)) or v is None} for c in cs]
++            json.dump({"A": _j(A0), "B": _j(B0), "merged": _j(allc), "night_t": night_t.tolist(),
++                       "night_o": np.asarray(night_o).tolist()}, open(os.environ["TNO_MERGE_DUMP"], "w"), default=float)
++        except Exception as ex:
++            log("merge dump failed", ex)
+     return dens_calib(phys_demote(interleave(dedup_sky(allc, night_t, night_o))))
+ 
+ 
+ DEDUP_AS = float(os.environ.get("TNO_DEDUP_AS", "1.5"))
++DEDUP_NEED = int(float(os.environ.get("TNO_DEDUP_NEED", "3") or 3))  # gen 91: nights that must agree (3 = gen085)
++MATCH_NEED = int(float(os.environ.get("TNO_MATCH_NEED", "3") or 3))  # gen 91: L-S match nights (3 = gen085)
+ 
+ 
+ def dedup_sky(cs, night_t, night_o, tol_as=None):
+@@ -256,7 +269,7 @@
+         tol_as = DEDUP_AS if tol_as is None else tol_as
+         cs = sorted(cs, key=lambda c: -float(c["p"]))
+         U = tracks(cs, night_t, night_o)
+-        need = min(3, len(night_t))
++        need = min(DEDUP_NEED, len(night_t))
+         cosm = math.cos(tol_as * ARC)
+         keep = []
+         for j in range(len(cs)):

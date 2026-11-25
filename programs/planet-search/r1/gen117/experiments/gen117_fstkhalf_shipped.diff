@@ -1,0 +1,190 @@
+diff -ru -x experiments -x __pycache__ $RSI_SANDBOX/r1/gen117/workspace/submission/stackd/fstk.py submission/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen117/workspace/submission/stackd/fstk.py	2026-11-07 02:19:29
++++ submission/stackd/fstk.py	2026-11-07 05:53:34
+@@ -38,6 +38,13 @@
+     RCLIP = float(os.environ.get("TNO_FSTK_RCLIP", "3.0"))
+     RPOOL = float(os.environ.get("TNO_FSTK_RPOOL", "50") or 1.0)   # gen 115: 1 -> 50 (15000 coarse peaks re-scored, best NPK kept; 1 = gen114)
+     RSUB = int(os.environ.get("TNO_FSTK_RSUB", "2") or 2)       # sub-steps per half unit: grid -0.5..0.5 step 0.5/RSUB
++    # gen 117: half-step position pass.  After ALL distances are done (pass 0), the left-over fstk time re-runs the
++    # distances with the 2" max-pooled maps re-pooled 1 raw px (half a search px) diagonally offset and the search grid
++    # shifted by the same sky offset, so a track straddling the pooling cells of pass 0 is centred in pass 1.  Its rows are
++    # merged per distance with pass 0's (near-duplicates keep the better score, union capped to NPK rows).  Only runs when
++    # pass 0 finished every distance inside the fstk slice (A100), so a time-limited search (Mac) is unchanged.
++    HALF = os.environ.get("TNO_FSTK_HALF", "1") == "1"   # 0 = gen116
++    HCAP = int(os.environ.get("TNO_FSTK_HCAP", "0") or 0)       # union cap per distance (0 = NPK)
+     if RS and DCLIP <= 0:
+         RS = False
+     probes = []
+@@ -62,6 +69,9 @@
+         sm_.append(a_.half())
+     smaps = torch.cat(sm_, 0); del sm_
+     H2, W2 = smaps.shape[1:]
++    cur_hp = 0
++    p0_rows = {}       # pass-0 row indices in rows_out per distance index
++    nhalf = [0, 0, 0]  # pass-1 rows: replaced, added, dropped
+     # distance grid (dgrid_deep step logic)
+     o = obs[sel]; tt = ts - tref
+     A = np.stack([np.ones_like(tt), tt], 1)
+@@ -102,10 +112,30 @@
+     ntot = 0; tconv = 0.0
+     nfail = 0   # gen 114: a failing slice is skipped (continue); stop only after 3 failures in a row
+     pstat = []
+-    for di, d in enumerate(dg):
++    work = [(di_, d_, 0) for di_, d_ in enumerate(dg)]
++    if HALF and DCLIP > 0:
++        work += [(di_, d_, 1) for di_, d_ in enumerate(dg)]
++    for wi_, (di, d, hp) in enumerate(work):
+         if time.time() - T0 > deadline:
+-            log(f"fstk: deadline at distance {di}/{len(dg)}")
++            log(f"fstk: deadline at distance {di}/{len(dg)} pass {hp}")
+             break
++        if hp == 1 and cur_hp == 0:
++            try:
++                del smaps
++                sm_ = []
++                for i_ in range(0, N, 4):
++                    a_ = F.max_pool2d(maps[i_:i_ + 4, 1:, 1:].float()[None], 2, 2)[0]
++                    a_ = a_.clamp_(-max(DCLIP, RCLIP) if RS else -DCLIP, max(DCLIP, RCLIP) if RS else DCLIP)
++                    b_ = torch.zeros((a_.shape[0], H2, W2), dtype=torch.float16, device=a_.device)
++                    b_[:, :min(H2, a_.shape[1]), :min(W2, a_.shape[2])] = a_[:, :H2, :W2].half()
++                    sm_.append(b_); del a_
++                smaps = torch.cat(sm_, 0); del sm_
++                cur_hp = 1
++                log(f"fstk: half-step pass over {len(dg)} distances, {deadline - (time.time() - T0):.0f}s left")
++            except Exception as ex:
++                log("fstk half-step setup failed:", repr(ex)[:200])
++                smaps = None
++                break
+         Dm = None
+         try:
+             t_d0 = time.time()
+@@ -122,8 +152,19 @@
+             mx = int(np.abs(offs).max() + vmax * mdt + 8)
+             HD, WD = H2 + 2 * mx, W2 + 2 * mx
+             TD_t = torch.tensor(TD, dtype=torch.float32, device=dev)
+-            gxd = (torch.arange(WD, device=dev, dtype=torch.float32) - (WD - 1) / 2) * SP
+-            gyd = (torch.arange(HD, device=dev, dtype=torch.float32) - (HD - 1) / 2) * SP
++            hdx = hdy = 0.0; hpu = 0.0
++            if hp == 1:
++                # grid shift (search px) whose sky offset is +1 raw px (+0.5 pooled px) in both image axes
++                def _uv(gx, gy, n=int(sel[0])):
++                    w_ = TD[2] + gx * TD[0] + gy * TD[1]; w_ = w_ / np.linalg.norm(w_)
++                    q_ = TF0 @ (d * w_ - obs[n])
++                    return np.array([(q_[0] / q_[2] - x0) / (2 * PIX), (q_[1] / q_[2] - y0) / (2 * PIX)])
++                u00 = _uv(0.0, 0.0)
++                J_ = np.stack([_uv(SP, 0.0) - u00, _uv(0.0, SP) - u00], 1)
++                hdx, hdy = (float(v) for v in np.linalg.solve(J_, np.array([0.5, 0.5])))
++                hpu = 0.5
++            gxd = (torch.arange(WD, device=dev, dtype=torch.float32) - (WD - 1) / 2 + hdx) * SP
++            gyd = (torch.arange(HD, device=dev, dtype=torch.float32) - (HD - 1) / 2 + hdy) * SP
+             Dm = torch.zeros((K, HD, WD), dtype=torch.float16, device=dev)
+             Dm3 = None
+             if RS:
+@@ -141,7 +182,7 @@
+                     X = d * Wd - torch.tensor(obs[n] - 0.0, dtype=torch.float32, device=dev)
+                     q = X @ TF0_t.T
+                     sx = q[..., 0] / q[..., 2]; sy = q[..., 1] / q[..., 2]
+-                    ux = (sx - x0) / (2 * PIX) - 0.25; uy = (sy - y0) / (2 * PIX) - 0.25
++                    ux = (sx - x0) / (2 * PIX) - 0.25 - hpu; uy = (sy - y0) / (2 * PIX) - 0.25 - hpu
+                     grid = torch.stack([2 * ux / (W2 - 1) - 1, 2 * uy / (H2 - 1) - 1], -1)[None]
+                     rows_.append(F.grid_sample(src_[None, None], grid, mode="nearest",
+                                                padding_mode="zeros", align_corners=True)[0, 0].half())
+@@ -276,9 +317,15 @@
+                 log(f"fstk rescore d={d:.2f} ({time.time() - t_rs0:.1f}s): {len(sc)} peaks, clip{RCLIP} exact max {s0_.max():.2f}, local max {s2_.max():.2f}, "
+                     f"median lift {np.median(s2_ - s0_):.2f}, kept {len(o2_)}, "
+                     f"overlap with old top {len(set(o2_.tolist()) & set(range(min(NPK, len(sc)))))}")
++                new_ = []
+                 for j in o2_:
+-                    px = (xx[j] + ex_[j] + P - (WD - 1) / 2) * SP; py = (yy[j] + ey_[j] + P - (HD - 1) / 2) * SP
+-                    rows_out.append((float(s2_[j]), d, (VX[hh[j]] + evx_[j]) * SP, (VY[hh[j]] + evy_[j]) * SP, px, py, fi))
++                    px = (xx[j] + ex_[j] + P - (WD - 1) / 2 + hdx) * SP; py = (yy[j] + ey_[j] + P - (HD - 1) / 2 + hdy) * SP
++                    new_.append((float(s2_[j]), d, (VX[hh[j]] + evx_[j]) * SP, (VY[hh[j]] + evy_[j]) * SP, px, py, fi))
++                if hp == 0:
++                    p0_rows[di] = list(range(len(rows_out), len(rows_out) + len(new_)))
++                    rows_out.extend(new_)
++                else:
++                    rows_out = _half_merge(rows_out, p0_rows.get(di, []), new_, HCAP or NPK, SP, dv, nhalf)
+                 s2sorted = np.sort(s2_)[::-1][:NPK]
+                 if probes:
+                     kx_ = xx[o2_] + ex_[o2_]; ky_ = yy[o2_] + ey_[o2_]; ks_ = s2_[o2_]
+@@ -310,7 +357,7 @@
+                     wn = math.sqrt(1 + ppx ** 2 + ppy ** 2)
+                     Vperp = Vp - (Vp @ wv) * wv
+                     pvx = (TD[0] @ Vperp) * wn / d / SP; pvy = (TD[1] @ Vperp) * wn / d / SP
+-                    xi = int(round(ppx / SP + (WD - 1) / 2 - P)); yi = int(round(ppy / SP + (HD - 1) / 2 - P))
++                    xi = int(round(ppx / SP - hdx + (WD - 1) / 2 - P)); yi = int(round(ppy / SP - hdy + (HD - 1) / 2 - P))
+                     if not (5 <= xi < Wc - 5 and 5 <= yi < Hc - 5):
+                         log(f"fstk probe {pr.get('tag', '?')}: off map"); continue
+                     bestv = -1e9; bh_ = None
+@@ -331,7 +378,7 @@
+                             r_ = _rescore(torch, dev, Dm3, np.array([bh_[0]], float), np.array([bh_[1]], float),
+                                           np.array([bh_[2]]), np.array([bh_[3]]), dts_c, P, WD, HD, norm, dv, RSUB)
+                             # also a continuous-truth evaluation (true sub-px position & velocity, no search)
+-                            r1_ = _rescore(torch, dev, Dm3, np.array([ppx / SP + (WD - 1) / 2 - P]), np.array([ppy / SP + (HD - 1) / 2 - P]),
++                            r1_ = _rescore(torch, dev, Dm3, np.array([ppx / SP - hdx + (WD - 1) / 2 - P]), np.array([ppy / SP - hdy + (HD - 1) / 2 - P]),
+                                            np.array([pvx]), np.array([pvy]), dts_c, P, WD, HD, norm, dv, 0)
+                             if rres is not None:
+                                 rk2 = int((s2sorted > r_[0][0]).sum())
+@@ -350,12 +397,12 @@
+                     inprior = (VLO * vcs <= math.hypot(pvx, pvy) <= VHI * vcs) and \
+                         abs(math.atan2(pvx * vcy - pvy * vcx, pvx * vcx + pvy * vcy)) <= ANG
+                     pstat.append((pr.get("tag", "?"), d, bestv, bl, rk))
+-                    log(f"fstk probe {pr.get('tag', '?')}: d={d:.2f} (r {rp:.2f}), |v|/vc {math.hypot(pvx, pvy) / vcs:.3f}, "
++                    log(f"fstk probe {pr.get('tag', '?')}: pass {hp} d={d:.2f} (r {rp:.2f}), |v|/vc {math.hypot(pvx, pvy) / vcs:.3f}, "
+                         f"in prior {inprior}, exact-hyp local max {bestv:.2f}, best-map 5x5 max {bl:.2f}, "
+                         f"rank among kept peaks {rk}, map max {float(sc.max()) if len(sc) else 0:.2f}{rsv}")
+                 except Exception as ex:
+                     log("fstk probe failed:", repr(ex)[:120])
+-            log(f"fstk d={d:.2f}: {nh}/{nprior} hyps in {dtc:.1f}s ({nh / max(dtc, 1e-6):.0f} hyp/s, K {K}, "
++            log(f"fstk{' half' if hp else ''} d={d:.2f}: {nh}/{nprior} hyps in {dtc:.1f}s ({nh / max(dtc, 1e-6):.0f} hyp/s, K {K}, "
+                 f"{'int8 q%.2f' % qs if use8 else 'fp16'}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
+                 f"peaks>5/6/7 {nab}, kept {len(sc)}")
+             del Dq, bs, pk
+@@ -373,10 +420,46 @@
+                 break
+             continue
+         nfail = 0
+-    del smaps
++    smaps = None
++    rows_out = [r for r in rows_out if r is not None]
++    if cur_hp:
++        log(f"fstk half-step pass: {nhalf[0]} rows replaced, {nhalf[1]} added, {nhalf[2]} dropped")
+     log(f"fstk done: {ntot} hypotheses, kernel {tconv:.1f}s ({ntot / max(tconv, 1e-6):.0f} hyp/s), {len(rows_out)} rows, "
+         f"{time.time() - t_all0:.1f}s total")
+     return rows_out, frames_out
++
++
++def _half_merge(rows_out, idx0, new_, cap, SP, dv, stat):
++    """gen 117: merge half-step pass rows of one distance into pass 0's rows (indices idx0 in rows_out).  A new row
++    within 1.5 search px and 1.5 velocity steps of a pass-0 row replaces it if better, else is dropped; the union is
++    capped to the best `cap` rows (dropped pass-0 rows are removed from rows_out)."""
++    if not new_:
++        return rows_out
++    old = [rows_out[i] for i in idx0]
++    if old:
++        op = np.array([[r[4], r[5], r[2], r[3]] for r in old])
++    keep_old = list(old); add = []
++    for r in new_:
++        if old:
++            dd = np.hypot(op[:, 0] - r[4], op[:, 1] - r[5]) / SP
++            dvv = np.hypot(op[:, 2] - r[2], op[:, 3] - r[3]) / (SP * dv)
++            m = np.nonzero((dd <= 1.5) & (dvv <= 1.5))[0]
++            if len(m):
++                j = int(m[np.argmax([keep_old[i][0] for i in m])])
++                if r[0] > keep_old[j][0]:
++                    keep_old[j] = r; stat[0] += 1
++                else:
++                    stat[2] += 1
++                continue
++        add.append(r)
++    uni = sorted(keep_old + add, key=lambda r: -r[0])[:cap]
++    stat[1] += sum(1 for r in add if r in uni)
++    stat[2] += sum(1 for r in add if r not in uni)
++    # in place (other distances' index lists stay valid); surplus slots become None (filtered at the end)
++    for k, i in enumerate(idx0):
++        rows_out[i] = uni[k] if k < len(uni) else None
++    rows_out.extend(uni[len(idx0):])
++    return rows_out
+ 
+ 
+ def _rescore(torch, dev, Dm3, xx, yy, vx, vy, dts_c, P, WD, HD, norm, dv, RSUB):

@@ -1,0 +1,100 @@
+Only in .: arm.diff
+Only in .: out.json
+Only in .: run.log
+Binary files $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/__pycache__/fastfits.cpython-312.pyc and ./stackd/__pycache__/fastfits.cpython-312.pyc differ
+Only in ./stackd/__pycache__: finder.cpython-312.pyc
+Only in ./stackd/__pycache__: mapper.cpython-312.pyc
+Binary files $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/__pycache__/orbit.cpython-312.pyc and ./stackd/__pycache__/orbit.cpython-312.pyc differ
+diff -ru $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/finder.py ./stackd/finder.py
+--- $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ ./stackd/finder.py	2026-11-05 08:20:30
+@@ -173,6 +173,11 @@
+             w_exp = depth_weights(rows, res, use)
+             # frame = sum_i w_i z_i / sqrt(sum_i w_i^2) (weighted co-add below) -> frame S/N ~ sqrt(sum_i w_i^2)
+             wf = np.array([math.sqrt(sum(w_exp[i] ** 2 for i in m)) for m in fm])
++            # gen 87 (TNO_NSDW_W): unclipped frame depth weights for the night co-adds (matched-filter optimal)
++            try:
++                _NSDW["wraw"] = np.array([math.sqrt(sum(w_exp[i] ** 2 for i in m)) for m in fm]) / np.median(wf)
++            except Exception:
++                _NSDW["wraw"] = None
+             wf = np.clip(wf / np.median(wf), 0.25, 2.5)
+             log("depth weights per exposure:", " ".join(f"{rows[i]['band']}{w_exp[i]:.2f}" for i in sorted(use)))
+             log("depth weights per frame:", " ".join(f"{x:.2f}" for x in wf))
+@@ -1697,6 +1702,9 @@
+     return C, torch.cat(outV).cpu().numpy(), torch.cat(outK).cpu().numpy()
+ 
+ 
++_NSDW = {"wraw": None}
++
++
+ def night_seeds(torch, F, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H, deadline, NS, log_):
+     """gen 31 (v2): per-night co-add seeds.  Each night's frames are co-added (weighted, S/N units), local maxima
+     with night z >= NZ are linked across nights: for each distance d (heliocentric d-frame, motion linear), a pair
+@@ -1798,6 +1806,21 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 87 (TNO_NSDW, default on; 0 = gen085): night co-adds with unclipped depth weights (TNO_NSDW_W) and a global
++    # robust sigma renorm per finished night co-add, >= 1 only (TNO_NSDW_R).
++    NSDW = os.environ.get("TNO_NSDW", "1") != "0"
++    NSDW_W = NSDW and os.environ.get("TNO_NSDW_W", "1") != "0"
++    NSDW_R = NSDW and os.environ.get("TNO_NSDW_R", "1") != "0"
++    wN = wf; nsdw_log = []
++    if NSDW_W:
++        try:
++            wr_ = _NSDW.get("wraw")
++            if wr_ is not None and len(wr_) == len(wf) and np.all(np.isfinite(wr_)) and np.all(wr_ > 0):
++                wN = np.asarray(wr_, float)
++            log_(f"night seeds: NSDW weights {'raw' if wN is not wf else 'wf (fallback)'}: "
++                 f"{' '.join(f'{x:.2f}' for x in wN)}")
++        except Exception as ex_:
++            log_(f"night seeds: NSDW weights failed {repr(ex_)[:200]}"); wN = wf
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1815,9 +1838,23 @@
+             cw = torch.zeros((H, W), dtype=torch.float32, device=dev)
+             for jn, n in enumerate(idx):
+                 dx_, dy_ = int(round(float(sx[jn]))), int(round(float(sy[jn])))
+-                acc += shifted(maps[n].float(), dx_, dy_) * float(wf[n])
+-                cw += shifted(cov[n].float(), dx_, dy_) * float(wf[n] ** 2)
++                acc += shifted(maps[n].float(), dx_, dy_) * float(wN[n])
++                cw += shifted(cov[n].float(), dx_, dy_) * float(wN[n] ** 2)
+             z = torch.where(cw > 0, acc / torch.sqrt(torch.clamp(cw, min=1e-3)), torch.zeros_like(acc))
++            zsc_ = 1.0
++            if NSDW_R and time.time() - T0 < deadline:
++                # gen 87 (TNO_NSDW_R): global robust renorm of the finished night co-add (never scale up)
++                try:
++                    s_ = z[::5, ::5][cw[::5, ::5] > 0]
++                    if s_.numel() >= 1000:
++                        med_ = torch.median(s_)
++                        sd_ = float(1.4826 * torch.median(torch.abs(s_ - med_)))
++                        if math.isfinite(sd_) and sd_ > 1.0:
++                            zsc_ = sd_
++                            z = z / zsc_
++                except Exception as ex_:
++                    log_(f"night seeds: NSDW renorm failed {repr(ex_)[:200]}")
++                nsdw_log.append(round(zsc_, 3))
+             del acc, cw
+             mp = F.max_pool2d(z[None, None], 5, 1, 2)[0, 0]
+             pk = (z == mp) & (z >= NZ)
+@@ -1838,8 +1875,8 @@
+                 # leaving no room for faint (3.7-5 sigma) peaks.  Ceiling peaks are thinned to one per CEILC px cell and
+                 # get at most CEILF x CAP slots; the rest of the cap goes to sub-ceiling peaks, highest first.
+                 try:
+-                    wk_ = np.asarray(wf[idx], float)
+-                    zc_ = 5.0 * wk_.sum() / math.sqrt(max((wk_ ** 2).sum(), 1e-9))
++                    wk_ = np.asarray(wN[idx], float)
++                    zc_ = 5.0 * wk_.sum() / math.sqrt(max((wk_ ** 2).sum(), 1e-9)) / zsc_
+                     isc = sc >= 0.97 * zc_
+                     ic_ = torch.nonzero(isc, as_tuple=True)[0]
+                     nc0_ = int(ic_.numel())
+@@ -1887,6 +1924,8 @@
+     tN = np.array(tN); oN = np.array(oN); nN = len(nu)
+     log_(f"night seeds: groups per night {Gk.tolist()} (spans hr {np.round(spans, 2).tolist()}); "
+          f"peaks per map {[len(p) for p in PK]}")
++    if NSDW:
++        log_(f"night seeds: NSDW on (W={int(NSDW_W)} R={int(NSDW_R)}); renorm scale per map {nsdw_log}")
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own

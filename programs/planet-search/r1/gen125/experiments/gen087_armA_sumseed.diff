@@ -1,0 +1,228 @@
+diff -ru -x r $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/finder.py ./stackd/finder.py
+--- $RSI_SANDBOX/r1/gen087/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ ./stackd/finder.py	2026-11-05 08:35:06
+@@ -1085,8 +1085,11 @@
+                     if len(kp) >= NSN:
+                         break
+                 kp2 = []    # gen 80: n3-ranked seeds, deduped against the night/linker seeds and each other
++                # gen 87: with TNO_SUMSEED the night_seeds call can end past ns_dl (sumseed has its own time cap), so the
++                # guard is measured from now (gen087 run: all 2400 sumseed rows were dropped here by the old guard)
++                kp2_dl = (max(ns_dl, time.time() - T0) if os.environ.get("TNO_SUMSEED", "1") != "0" else ns_dl) + 0.05 * budget
+                 for j in range(n1_, len(NSs)):
+-                    if time.time() - T0 > ns_dl + 0.05 * budget or len(kp2) >= NS2N_:
++                    if time.time() - T0 > kp2_dl or len(kp2) >= NS2N_:
+                         break
+                     hit_ = sum(1 for k_ in range(len(fr_)) if (kx[j, k_], ky[j, k_]) in occ[k_])
+                     if hit_ >= 2:
+@@ -1798,6 +1801,11 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 87 (TNO_SUMSEED, default on; 0 = gen085): seedless sum-pooled coarse full-span orbit-grid seed stream.
++    SS_ON = os.environ.get("TNO_SUMSEED", "1") != "0"
++    SS_P = max(2, int(os.environ.get("TNO_SS_P", "4")))
++    SS_LO = float(os.environ.get("TNO_SS_LO", "-3")); SS_HI = float(os.environ.get("TNO_SS_HI", "4"))
++    SPM, SPC = [], []
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1877,6 +1885,14 @@
+                     top = torch.topk(sc, CAP).indices
+                 yy, xx, sc = yy[top], xx[top], sc[top]
+             GI[-1].append(nm_i)
++            if SS_ON:
++                try:   # gen 87 (TNO_SUMSEED): sum-pooled (P x P) clipped night co-add, for the coarse full-span stack
++                    zc_ = torch.clamp(z, SS_LO, SS_HI)
++                    SPM.append(F.avg_pool2d(zc_[None, None], SS_P, SS_P)[0, 0] * float(SS_P))
++                    SPC.append(F.avg_pool2d((z != 0).float()[None, None], SS_P, SS_P)[0, 0])
++                    del zc_
++                except Exception as ex_:
++                    log_(f"sumseed: pooling failed {repr(ex_)[:200]}"); SS_ON = False
+             NMs[nm_i] = F.max_pool2d(z[None, None], 3, 1, 1)[0, 0].reshape(-1).half(); nm_i += 1
+             del z, mp, pk
+             PK.append(np.stack([xx.cpu().numpy(), yy.cpu().numpy()], 1).astype(np.float64))
+@@ -2150,12 +2166,21 @@
+             rows.sort(key=lambda r: -r[0]); rows = rows[:4 * NS]
+     del NMs
+     log_(f"night seeds: {nd}/{len(dg)} distances, {ncand} 3-night candidates")
++    if SS_ON and len(SPM) == int(Gk.sum()):
++        try:
++            rss = _sumseed(torch, F, dev, SPM, SPC, GI, GC, tN, oN, tref, oref, TF0, x0, y0, PIX, W, H, SS_P, frames, log_)
++            if rss:
++                rows2 = (rows2 if NS2N > 0 else []) + rss
++        except Exception as ex_:
++            import traceback; traceback.print_exc()
++            log_(f"sumseed failed: {repr(ex_)[:300]}")
++    del SPM, SPC
+     if tkbest:
+         rows = rows + list(tkbest.values())
+         log_(f"night seeds: track-key dedup {len(tkbest)} distinct keys (cell {TKC} px)")
+     rows.sort(key=lambda r: -r[0])
+     if rows2:
+-        rows2.sort(key=lambda r: -r[0]); rows2 = rows2[:4 * NS2N]
++        rows2.sort(key=lambda r: -r[0]); rows2 = rows2[:4 * max(NS2N, 1)] if NS2N > 0 else rows2
+         log_(f"nseed2: {len(rows2)} n3-ranked rows (n3 >= {NS2Z}), top n3 {rows2[0][0]:.2f}")
+         rows = rows + rows2
+     if bp_best:
+@@ -2163,6 +2188,161 @@
+         log_(f"bright-pair seeds: {len(bp_best)} pair keys, {len(rbp)} kept")
+         rows = rows + rbp
+     return rows, frames
++
++
++def _sumseed(torch, F, dev, SPM, SPC, GI, GC, tN, oN, tref, oref, TF0, x0, y0, PIX, W, H, P, frames, log_):
++    """gen 87 (TNO_SUMSEED): seedless coarse full-span stack.  No single-night threshold: each night co-add
++    (motion-compensated group nearest in 1/d) is clipped and SUM-pooled into P x P cells (robustly renormalised to
++    unit noise); for a coarse grid of (distance, d-frame velocity) hypotheses the shifted pooled night maps are
++    summed over all nights / sqrt(n nights covered); top local maxima become rows (score, d, vx, vy, px, py, fi,
++    100 + n_cov) that ride the nseed2 channel in main (dedup + 1:1:1 interleave).  Time-capped (TNO_SS_T s)."""
++    t0 = time.time()
++    TL = float(os.environ.get("TNO_SS_T", "60"))
++    KOUT = int(os.environ.get("TNO_SS_K", "2400"))
++    VR = float(os.environ.get("TNO_SS_VR", "0.6"))
++    VS = float(os.environ.get("TNO_SS_VS", "1.0"))
++    SSZ = float(os.environ.get("TNO_SS_Z", "3.0"))
++    CLIP = float(os.environ.get("TNO_SS_CLIP", "3.0"))
++    NDMAX = int(os.environ.get("TNO_SS_NDMAX", "10"))
++    BS = int(os.environ.get("TNO_SS_B", "64"))
++    nN = len(tN)
++    if nN < 3:
++        return []
++    Hp, Wp = SPM[0].shape
++    VM = []
++    for i in range(len(SPM)):
++        ok_ = SPC[i] > 0.5
++        v_ = SPM[i][ok_]
++        if v_.numel() > 400000:
++            v_ = v_[::int(v_.numel() // 400000) + 1]
++        if v_.numel() < 100:
++            SPM[i] = torch.zeros_like(SPM[i]); VM.append(torch.zeros_like(SPM[i])); continue
++        med = v_.median(); mad = float((v_ - med).abs().median()) * 1.4826
++        SPM[i] = torch.where(ok_, torch.clamp((SPM[i] - med) / max(mad, 1e-3), -CLIP, CLIP), torch.zeros_like(SPM[i]))
++        VM.append(ok_.float())
++    kref = int(np.argmin(np.abs(tN - tref)))
++    # distance grid: observer non-linear motion shifts predictions by <= ~P px between grid distances
++    A_ = np.stack([np.ones_like(tN), tN - tref], 1)
++    coef, *_ = np.linalg.lstsq(A_, oN, rcond=None)
++    r_ = oN - A_ @ coef; r_ = r_ - np.outer(r_ @ TF0[2], TF0[2])
++    rmax = max(np.sqrt((r_ ** 2).sum(1)).max(), 1e-6)
++    lo = 1 / float(os.environ.get("TNO_NS_DMAX", "75")); hi = 1 / float(os.environ.get("TNO_NS_DMIN", "28"))
++    nst = int(np.clip(math.ceil((hi - lo) / (P * ARCR / rmax)), 1, NDMAX))
++    dg = sorted([1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)], key=lambda d: abs(math.log(d / 42.0)))
++    z0 = TF0[2]; pole = np.array([0, -math.sin(EPS), math.cos(EPS)])
++    xc_, yc_ = (W - 1) / 2.0, (H - 1) / 2.0
++    def u_of(px_, py_):
++        xi = x0 + np.asarray(px_) * PIX; eta = y0 + np.asarray(py_) * PIX
++        u = TF0[2][None] + np.atleast_1d(xi)[:, None] * TF0[0][None] + np.atleast_1d(eta)[:, None] * TF0[1][None]
++        return u / np.linalg.norm(u, axis=1)[:, None]
++    def to_dframe(u, o, d, TD):
++        bb = u @ o; rr = -bb + np.sqrt(np.maximum(bb * bb - o @ o + d * d, 0))
++        X = (o[None] + rr[:, None] * u) / d
++        q = X @ TD.T
++        return np.stack([q[:, 0] / q[:, 2], q[:, 1] / q[:, 2]], 1)
++    def pixk(Pd, k, d, TD):
++        wv = TD[2][None] + Pd[:, 0:1] * TD[0][None] + Pd[:, 1:2] * TD[1][None]
++        X = d * wv / np.linalg.norm(wv, axis=1)[:, None] - oN[k][None]
++        q = X @ TF0.T
++        return np.stack([(q[:, 0] / q[:, 2] - x0) / PIX, (q[:, 1] / q[:, 2] - y0) / PIX], 1)
++    dtk = tN - tN[kref]
++    maxdt = max(float(np.abs(dtk).max()), 1e-3)
++    jobs = []        # per distance: (d, TD, V (Nv,2), cells (Nv,nN,2), gsel, fi)
++    for d in dg:
++        b_ = oref @ z0; rho = -b_ + math.sqrt(b_ * b_ - oref @ oref + d * d)
++        w0 = (oref + rho * z0) / d
++        TD = tframe(w0)
++        vmax = math.sqrt(2 * GM / d) / d
++        vc = np.cross(pole, w0); vc = vc / np.linalg.norm(vc) * math.sqrt(GM / d)
++        vcx, vcy = (TD[0] @ vc) / d, (TD[1] @ vc) / d
++        vcs = math.hypot(vcx, vcy)
++        qc = to_dframe(u_of(xc_, yc_), oN[kref], d, TD)
++        p0 = pixk(qc, kref, d, TD)[0]
++        eps_ = 1e-6
++        sc_ = float(np.linalg.norm(pixk(qc + np.array([[eps_, 0.0]]), kref, d, TD)[0] - p0)) / eps_   # px per d-frame rad
++        stv = VS * P / (sc_ * maxdt)
++        nv = int(math.ceil(VR * vcs / stv))
++        g_ = np.arange(-nv, nv + 1) * stv
++        GX, GY = np.meshgrid(g_, g_)
++        off = np.stack([GX.ravel(), GY.ravel()], 1)
++        rr_ = np.hypot(off[:, 0], off[:, 1])
++        V = off + np.array([vcx, vcy])[None]
++        okv = (rr_ <= VR * vcs + 1e-12) & (np.hypot(V[:, 0], V[:, 1]) <= vmax)
++        o_ = np.argsort(rr_[okv], kind="stable")
++        V = V[okv][o_]
++        cells = np.zeros((len(V), nN, 2), np.int64)
++        for k in range(nN):
++            pk_ = pixk(qc + V * dtk[k], k, d, TD) - p0[None]
++            cells[:, k, 0] = np.rint(pk_[:, 0] / P).astype(np.int64)
++            cells[:, k, 1] = np.rint(pk_[:, 1] / P).astype(np.int64)
++        # identical cell-shift vectors are the same hypothesis on the pooled grid
++        _, fu_ = np.unique(cells.reshape(len(V), -1), axis=0, return_index=True)
++        fu_ = np.sort(fu_)
++        V, cells = V[fu_], cells[fu_]
++        gsel = [GI[k][int(np.argmin(np.abs(GC[k] - 1 / d)))] for k in range(nN)]
++        fi = len(frames); frames.append((TD, tref, oref))
++        jobs.append((d, TD, V, cells, gsel, fi))
++    log_(f"sumseed: P={P} pooled {Hp}x{Wp}, {len(dg)} distances, hypotheses per distance "
++         f"{[len(j[2]) for j in jobs]}, kref {kref}, setup {time.time() - t0:.1f}s")
++    # batches round-robin over distances (inner velocities first), so the time cap trims the outer velocities
++    bl = []
++    for ji, j in enumerate(jobs):
++        for bi, s0 in enumerate(range(0, len(j[2]), BS)):
++            bl.append((bi, ji, s0))
++    bl.sort()
++    best = {}
++    nh = 0; nb = 0
++    far = int(np.argmax(np.abs(dtk)))
++    MG = int(max(int(np.abs(j[3]).max()) if len(j[3]) else 0 for j in jobs)) + 1
++    SPP = [F.pad(m_[None, None], (MG, MG, MG, MG))[0, 0] for m_ in SPM]     # zero-padded (outside = no coverage)
++    VMP = [F.pad(m_[None, None], (MG, MG, MG, MG))[0, 0] for m_ in VM]
++    iyt = torch.arange(Hp, device=dev, dtype=torch.int64); ixt = torch.arange(Wp, device=dev, dtype=torch.int64)
++    for bi, ji, s0 in bl:
++        if time.time() - t0 > TL:
++            log_(f"sumseed: time cap after {nb}/{len(bl)} batches")
++            break
++        d, TD, V, cells, gsel, fi = jobs[ji]
++        cb = cells[s0:s0 + BS]; B = len(cb)
++        acc = torch.zeros((B, Hp, Wp), dtype=torch.float32, device=dev)
++        cnt = torch.zeros((B, Hp, Wp), dtype=torch.float32, device=dev)
++        cbt = torch.from_numpy(np.clip(cb, -MG, MG) + MG).to(dev)
++        for k in range(nN):
++            ri = (iyt[None, :] + cbt[:, k, 1:2])[:, :, None]       # (B, Hp, 1)
++            ci = (ixt[None, :] + cbt[:, k, 0:1])[:, None, :]       # (B, 1, Wp)
++            acc += SPP[gsel[k]][ri, ci]
++            cnt += VMP[gsel[k]][ri, ci]
++        S = torch.where(cnt >= 3, acc / torch.sqrt(torch.clamp(cnt, min=1.0)), torch.zeros_like(acc))
++        mp = F.max_pool2d(S[:, None], 3, 1, 1)[:, 0]
++        pk = (S == mp) & (S >= SSZ)
++        flat = torch.nonzero(pk.reshape(-1), as_tuple=True)[0]
++        if flat.numel():
++            sv = S.reshape(-1)[flat]
++            if sv.numel() > KOUT:
++                tk = torch.topk(sv, KOUT).indices; flat, sv = flat[tk], sv[tk]
++            fl = flat.cpu().numpy(); svn = sv.float().cpu().numpy()
++            cn_ = cnt.reshape(-1)[flat].cpu().numpy()
++            bb_ = fl // (Hp * Wp); rem = fl % (Hp * Wp); cy = rem // Wp; cx = rem % Wp
++            for j in range(len(fl)):
++                key = (int(cy[j]), int(cx[j]), int(cy[j] + cb[bb_[j], far, 1]), int(cx[j] + cb[bb_[j], far, 0]))
++                if key not in best or best[key][0] < svn[j]:
++                    best[key] = (float(svn[j]), ji, s0 + int(bb_[j]), int(cy[j]), int(cx[j]), int(cn_[j]))
++            if len(best) > 8 * KOUT:
++                kb_ = sorted(best.items(), key=lambda it: -it[1][0])[:2 * KOUT]
++                best.clear(); best.update(kb_)
++        del acc, cnt, S, mp, pk
++        nh += B; nb += 1
++    top = sorted(best.values(), key=lambda r: -r[0])[:KOUT]
++    rows = []
++    for sc, ji, vi, cy, cx, nc in top:
++        d, TD, V, cells, gsel, fi = jobs[ji]
++        px_ = cx * P + (P - 1) / 2.0; py_ = cy * P + (P - 1) / 2.0
++        q = to_dframe(u_of(px_, py_), oN[kref], d, TD)[0]
++        v = V[vi]
++        p = q - v * (tN[kref] - tref)
++        rows.append((float(sc), float(d), float(v[0]), float(v[1]), float(p[0]), float(p[1]), fi, 100 + int(nc)))
++    log_(f"sumseed: {nh} hypotheses in {nb} batches, {len(best)} distinct peaks >= {SSZ}, {len(rows)} rows, "
++         f"top scores {[round(r[0], 2) for r in rows[:6]]}, {time.time() - t0:.1f}s")
++    return rows
+ 
+ 
+ BAND_F = {"g": 0.8, "r": 1.0, "i": 1.0, "z": 0.8, "Y": 0.5, "VR": 1.15}

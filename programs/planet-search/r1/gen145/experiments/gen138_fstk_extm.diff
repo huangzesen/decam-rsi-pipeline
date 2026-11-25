@@ -1,0 +1,37 @@
+--- $RSI_SANDBOX/r1/gen138/tmp/base136/stackd/finder.py	2026-11-08 14:12:59
++++ stackd/finder.py	2026-11-08 14:25:14
+@@ -637,6 +637,7 @@
+         try:
+             import fstk as fstk_
+             dl_ = min(search_deadline, (time.time() - T0) + float(os.environ.get("TNO_FSTK_F", "0.20")) * budget)
++            tcore0_ = time.time()
+             fr_rows, fr_frames = fstk_.fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0,
+                                                     pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit)
+             if fr_frames:
+@@ -662,6 +663,26 @@
+                     os.environ.get("TNO_FSTK_EXT", "0.85:1.12:40,0.72:1.28:40").split(",") if x.strip() and x.strip() != "0"]
+             prev_ = (float(os.environ.get("TNO_FSTK_VLO", "0.85")), float(os.environ.get("TNO_FSTK_VHI", "1.12")),
+                      float(os.environ.get("TNO_FSTK_ANG", "25")))
++            # gen 138 (TNO_FSTK_EXTM, default 1; 0 = gen136): the rings are nested, so their union is the last ring.
++            # Search that union in ONE pass (minus the core prior) instead of one pass per ring: every pass re-warps all
++            # frames, finds peaks and re-scores them for every distance slice, a fixed per-slice cost paid once instead
++            # of once per ring.  Slices keep the _dkey (population prior) order, so the best-populated distances get
++            # both rings first instead of ring 1 at every distance before any of ring 2.
++            # Only when time is ample (left >= TNO_FSTK_EXTMR x the core sweep's time): the merged pass costs ~3.3x the
++            # core (Mac emulation) vs ~1.85x for ring 1 alone, so with less time gen136's ring-1-first order is kept.
++            # Merging applies only to nested rings (each contains the previous one).
++            try:
++                tcore_ = time.time() - tcore0_
++            except Exception:
++                tcore_ = 1e9
++            nest_ = all(b_[0] <= a_[0] and b_[1] >= a_[1] and b_[2] >= a_[2] for a_, b_ in zip(ext_, ext_[1:]))
++            if len(ext_) > 1 and nest_ and os.environ.get("TNO_FSTK_EXTM", "1") != "0":
++                left_ = dl_ - (time.time() - T0)
++                if left_ >= float(os.environ.get("TNO_FSTK_EXTMR", "2.2")) * tcore_:
++                    log(f"fstk ext: merged ring pass ({left_:.0f}s left, core sweep took {tcore_:.0f}s)")
++                    ext_ = ext_[-1:]
++                else:
++                    log(f"fstk ext: sequential rings ({left_:.0f}s left, core sweep took {tcore_:.0f}s)")
+             for pr_ in ext_:
+                 left_ = dl_ - (time.time() - T0)
+                 if left_ < 8:

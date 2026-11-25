@@ -1,0 +1,94 @@
+diff -ru -x _ ../workspace/history/gen105/submission/stackd/fstk.py armC/stackd/fstk.py
+--- ../workspace/history/gen105/submission/stackd/fstk.py	2026-11-06 07:28:37
++++ armC/stackd/fstk.py	2026-11-06 08:32:35
+@@ -30,6 +30,9 @@
+     PTH = float(os.environ.get("TNO_FSTK_PTHR", "3.0"))
+     DSTEP = float(os.environ.get("TNO_FSTK_DSTEP", "1.0"))     # distance step in units of the dgrid_deep step
+     MAXD = int(os.environ.get("TNO_FSTK_MAXD", "0") or 0)       # debug: at most this many distances
++    # gen 106 (arm C): robust 'leave-the-brightest-night-out' score: (sum - max_night) * K/(K-1), so a stack peak needs
++    # support from >= 2 nights other than its brightest one (single-night artifacts collapse).  TNO_FROB=0 -> gen105.
++    ROB = os.environ.get("TNO_FROB", "1") == "1"
+     CHB = float(os.environ.get("TNO_FSTK_CHMB", "384")) * 1e6   # conv output chunk size (bytes)
+     probes = []
+     try:
+@@ -176,6 +179,9 @@
+             L = Hc * WD
+             best = torch.full((L,), -127 if use8 else -1e4, dtype=Dq.dtype, device=dev)
+             acc = torch.empty((L,), dtype=Dq.dtype, device=dev)
++            rob = ROB and K >= 3
++            mxb = torch.empty((L,), dtype=Dq.dtype, device=dev) if rob else None
++            qsc = (K / (K - 1.0)) if rob else 1.0
+             SX = np.round(np.outer(VX, dts_c)).astype(np.int64)      # (nh, K)
+             SY = np.round(np.outer(VY, dts_c)).astype(np.int64)
+             OFF = (P + SY) * WD + (P + SX)
+@@ -185,7 +191,14 @@
+                 if (h & 63) == 0 and time.time() - T0 > deadline:
+                     break
+                 of_ = OFF[h]
+-                if K == 1:
++                if rob:
++                    s0_ = Dq[0, of_[0]:of_[0] + L]; s1_ = Dq[1, of_[1]:of_[1] + L]
++                    torch.add(s0_, s1_, out=acc); torch.maximum(s0_, s1_, out=mxb)
++                    for k_ in range(2, K):
++                        sk_ = Dq[k_, of_[k_]:of_[k_] + L]
++                        acc.add_(sk_); torch.maximum(mxb, sk_, out=mxb)
++                    acc.sub_(mxb)
++                elif K == 1:
+                     acc.copy_(Dq[0, of_[0]:of_[0] + L])
+                 else:
+                     torch.add(Dq[0, of_[0]:of_[0] + L], Dq[1, of_[1]:of_[1] + L], out=acc)
+@@ -199,9 +212,9 @@
+                 torch.cuda.synchronize()
+             dtc = time.time() - t_c0
+             tconv += dtc; ntot += nh
+-            del acc
++            del acc, mxb
+             # peaks
+-            bs = best.reshape(Hc, WD)[:, :Wc].float() * qn
++            bs = best.reshape(Hc, WD)[:, :Wc].float() * (qn * qsc)
+             del best
+             pk = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > PTH)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+@@ -218,8 +231,14 @@
+                 OFF_t = torch.tensor(OFF[:nh], dtype=torch.int64, device=dev)
+                 for h0 in range(0, nh, 256):
+                     v_ = torch.zeros((min(256, nh - h0), len(sc)), device=dev)
++                    vm_ = torch.full((min(256, nh - h0), len(sc)), -1e9, device=dev) if rob else None
+                     for k_ in range(K):
+-                        v_ += Dq[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
++                        g_ = Dq[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
++                        v_ += g_
++                        if rob:
++                            vm_ = torch.maximum(vm_, g_)
++                    if rob:
++                        v_ -= vm_
+                     m_, a_ = v_.max(0)
+                     bt_ = m_ > bv_
+                     bv_ = torch.where(bt_, m_, bv_); bi_ = torch.where(bt_, a_ + h0, bi_)
+@@ -260,11 +279,14 @@
+                             vx_ = (round(pvx / dv) + ddx) * dv; vy_ = (round(pvy / dv) + ddy) * dv
+                             for ey in (-1, 0, 1):
+                                 for ex in (-1, 0, 1):
+-                                    a_ = 0.0
++                                    a_ = 0.0; am_ = -1e9
+                                     for k_ in range(K):
+                                         sxx = int(round(vx_ * dts_c[k_])); syy = int(round(vy_ * dts_c[k_]))
+-                                        a_ += float(Dq[k_, (P + syy + yi + ey) * WD + P + sxx + xi + ex])
+-                                    bestv = max(bestv, a_ * qn)
++                                        g_ = float(Dq[k_, (P + syy + yi + ey) * WD + P + sxx + xi + ex])
++                                        a_ += g_; am_ = max(am_, g_)
++                                    if rob:
++                                        a_ -= am_
++                                    bestv = max(bestv, a_ * qn * qsc)
+                     bl = float(bs[yi - 2:yi + 3, xi - 2:xi + 3].max())
+                     rk = int((sc > bl).sum()) if len(sc) else 0
+                     inprior = (VLO * vcs <= math.hypot(pvx, pvy) <= VHI * vcs) and \
+@@ -276,7 +298,7 @@
+                 except Exception as ex:
+                     log("fstk probe failed:", repr(ex)[:120])
+             log(f"fstk d={d:.2f}: {nh}/{nprior} hyps in {dtc:.1f}s ({nh / max(dtc, 1e-6):.0f} hyp/s, K {K}, "
+-                f"{'int8 q%.2f' % qs if use8 else 'fp16'}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
++                f"{'int8 q%.2f' % qs if use8 else 'fp16'}{', rob' if rob else ''}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
+                 f"peaks>5/6/7 {nab}, kept {len(sc)}")
+             del Dq, bs, pk
+             Dm = None

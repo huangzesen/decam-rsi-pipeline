@@ -1,0 +1,104 @@
+diff -ru -x experiments -x __pycache__ -x dump -x run.log -x out.json -x pid workspace/submission/stackd/finder.py tmp/armA/stackd/finder.py
+--- workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ tmp/armA/stackd/finder.py	2026-11-05 10:32:57
+@@ -1145,7 +1145,36 @@
+         return v, c
+ 
+     wf2 = wf ** 2
++    night_f = np.array(night)
+ 
++    def score_off(S, chunk=256):
++        """gen 89 (TNO_OFFTRK): off-track statistic.  For each state, its pixel at frame n (night k) is sampled in every
++        frame j of a DIFFERENT night (where a real mover is not); per night k the mean over those j, then the MEDIAN over
++        nights k.  ~0 for a real mover, positive for tracks built on statics / halos / bleed trails / bright regions."""
++        out = np.zeros(len(S)); nk_out = np.zeros(len(S), int)
++        oth = night_f[:, None] != night_f[None, :]                 # (Npos, Nmap)
++        for s0 in range(0, len(S), chunk):
++            Sb = np.asarray(S[s0:s0 + chunk], float)
++            u = orbit.predict_dirs_b(Sb, t_ep, t, obs)
++            q = u @ TF0.T
++            ix = np.rint((q[..., 0] / q[..., 2] - x0) / PIX).astype(np.int64)
++            iy = np.rint((q[..., 1] / q[..., 2] - y0) / PIX).astype(np.int64)
++            okk = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
++            lin = np.where(okk, iy * W + ix, 0)                      # (K, Npos)
++            lin3 = lin[:, :, None] + np.arange(N)[None, None] * (H * W)   # (K, Npos, Nmap)
++            lt_ = torch.from_numpy(lin3.ravel()).to(dev)
++            v = maps.reshape(-1)[lt_].float().reshape(lin3.shape).cpu().numpy().astype(np.float64)
++            c = cov.reshape(-1)[lt_].cpu().numpy().reshape(lin3.shape) & okk[:, :, None] & oth[None]
++            v = np.where(c & np.isfinite(v), np.clip(v, -10.0, 30.0), 0.0)
++            per = np.full((len(Sb), len(nights_idx)), np.nan)
++            for k_, idx in enumerate(nights_idx):
++                cs = c[:, idx, :].sum((1, 2)); vs = v[:, idx, :].sum((1, 2))
++                per[:, k_] = np.where(cs > 0, vs / np.maximum(cs, 1), np.nan)
++            nk = np.isfinite(per).sum(1)
++            med = np.array([np.median(r_[np.isfinite(r_)]) if n_ else 0.0 for r_, n_ in zip(per, nk)])
++            out[s0:s0 + len(Sb)] = med; nk_out[s0:s0 + len(Sb)] = nk
++        return out, nk_out
++
+     def total(v, c):
+         if not DW:
+             nc = np.maximum(c.sum(1), 1)
+@@ -1552,7 +1581,9 @@
+                 write_out(os.path.join(RXD, nm__ + ".json"), n3boost(cs__))
+         if RANKX and len(cands) >= 2 and time.time() - T0 < budget * float(os.environ.get("TNO_RANKX_DL", "0.985")):
+             try:
+-                cands = rankx(cands, R, np.array(rkd), np.array(rsc), score_states, wf, nights_idx, CVZ, log, dump=rx_dump)
++                cands = rankx(cands, R, np.array(rkd), np.array(rsc), score_states, wf, nights_idx, CVZ, log, dump=rx_dump,
++                              offf=score_off if os.environ.get("TNO_OFFTRK", "1") != "0" else None,
++                              off_dl=T0 + budget * float(os.environ.get("TNO_OFFTRK_DL", "0.99")))
+                 write_out(a.out, n3boost(cands))
+             except Exception as ex:
+                 import traceback
+@@ -2224,7 +2255,7 @@
+ RX2_W, RX2_MODE = "0.75", "min"   # gen 83 TNO_RANKX2 defaults (paired inj7 dumps: top-25 hits 4 -> 5)
+ 
+ 
+-def rankx(cands, R, rkd, rsc, score_states, wf, nights_idx, cvz, log_, dump=None):
++def rankx(cands, R, rkd, rsc, score_states, wf, nights_idx, cvz, log_, dump=None, offf=None, off_dl=None):
+     """gen 82 (TNO_RANKX, default on; 0 = gen081): robust consistency rerank.  Along each candidate's track the
+     per-exposure S/N values are re-stacked with (1) the single brightest exposure removed and then (2) each night left
+     out in turn; the statistic is the MINIMUM over nights of that leave-one-night-out weighted stack S/N.  A real body
+@@ -2316,6 +2347,43 @@
+                    for j, c in enumerate(cands)])
+     key = W_ * zx + (1 - W_) * zp
+     pv = sorted([float(c["p"]) for c in cands], reverse=True)
++    key0 = key
++    if offf is not None and (off_dl is None or time.time() < off_dl):
++        # gen 89 (TNO_OFFTRK, default on; 0 = gen085): off-track penalty.  zoff = off-track statistic (score_off) as a
++        # z against the SAME refined-window-seed null as zx/zp (median / MAD); key -= LAM * max(0, zoff - THR).
++        try:
++            to_ = time.time()
++            oc_, nkc_ = offf(Sc); on_, _ = offf(nul)
++            mo_ = np.median(on_); so_ = 1.4826 * np.median(np.abs(on_ - mo_)) + 1e-3
++            ma_ = np.median(oc_); sa_ = 1.4826 * np.median(np.abs(oc_ - ma_)) + 1e-3
++            zoff = np.where(nkc_ >= 2, (oc_ - mo_) / so_, 0.0)
++            zoffa = np.where(nkc_ >= 2, (oc_ - ma_) / sa_, 0.0)
++            LAM_ = float(os.environ.get("TNO_OFFTRK_LAM", "1.0")); THR_ = float(os.environ.get("TNO_OFFTRK_THR", "3.0"))
++            key = key0 - LAM_ * np.maximum(0.0, zoff - THR_)
++            o25 = [int(j) for j in np.argsort(-key0, kind="stable")[:25]]
++            n25 = [int(j) for j in np.argsort(-key, kind="stable")[:25]]
++            log_(f"offtrk: null off median {mo_:.3f} MAD {so_:.3f} (n {len(on_)}); cands off median {ma_:.3f} MAD {sa_:.3f}; "
++                 f"{int((zoff > THR_).sum())} of {len(cands)} penalised (LAM {LAM_} THR {THR_}); "
++                 f"{len(set(o25) - set(n25))} of old top-25 left; old-top25 zoff {[round(float(zoff[j]), 1) for j in o25]} "
++                 f"in {time.time() - to_:.2f}s")
++            if dump is not None:
++                try:
++                    RXD_ = os.environ.get("TNO_RANKX_DUMP")
++                    if RXD_:
++                        np.savez(os.path.join(RXD_, "offtrk.npz"), Sc=Sc, key0=key0, zx=zx, zp=zp, off=oc_, nk=nkc_,
++                                 offnull=on_, p=np.array([float(c["p"]) for c in cands]))
++                    for nmv_, kv_ in [(f"off_null_l{l_:g}_t{t_:g}", key0 - l_ * np.maximum(0.0, zoff - t_))
++                                      for l_ in (0.5, 1.0, 3.0) for t_ in (2.0, 3.0, 5.0)] + \
++                                     [(f"off_all_l{l_:g}_t{t_:g}", key0 - l_ * np.maximum(0.0, zoffa - t_))
++                                      for l_ in (0.5, 1.0, 3.0) for t_ in (2.0, 3.0, 5.0)]:
++                        dump(nmv_, [dict(cands[j], p=pv[k]) for k, j in enumerate(np.argsort(-kv_, kind="stable"))])
++                except Exception as ex:
++                    log_("offtrk dump failed:", repr(ex)[:200])
++        except Exception as ex:
++            import traceback
++            traceback.print_exc()
++            log_("offtrk failed:", repr(ex)[:300])
++            key = key0
+     if dump is not None:   # gen 83 diagnostics (TNO_RANKX_DUMP): every variant's reorder, same p values, same rule
+         zxs = {"min": zx} if MODE_ == "min" else {}
+         for md_ in ("min", "med", "dropn"):

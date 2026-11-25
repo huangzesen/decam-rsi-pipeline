@@ -1,0 +1,111 @@
+--- history/gen132/submission/finder.py	2026-11-08 05:51:49
++++ submission/finder.py	2026-11-08 07:12:44
+@@ -207,9 +207,81 @@
+             p = p * m
+         out.append(dict(c, p=p, vet=f))
+     log(f"vet: {nd} of {len(cs)} candidates demoted")
+-    return out
++    return vet_promote(out) if PROM else out
+ 
+ 
++# gen 133 (TNO_VPROM): promotion from the raw-pixel vet.  A row whose forced S/N without its brightest night (zlbno)
++# is high, seen on >= PROM_NP nights, not static and night-to-night consistent gets p raised to a ramp in zlbno
++# (PROM_P0 at PROM_Z0 .. PROM_P1 at PROM_Z1), unless its track runs within PROM_AS of a row ranked above its new place
++# on >= 2 nights (a partial duplicate of a body already listed).  0 = gen132.
++PROM = int(float(os.environ.get("TNO_VPROM", "1") or 0))
++PROM_Z0 = float(os.environ.get("TNO_VPROM_Z0", "6"))
++PROM_Z1 = float(os.environ.get("TNO_VPROM_Z1", "12"))
++PROM_P0 = float(os.environ.get("TNO_VPROM_P0", "0.45"))
++PROM_P1 = float(os.environ.get("TNO_VPROM_P1", "0.8"))
++PROM_NP = int(float(os.environ.get("TNO_VPROM_NP", "3")))
++PROM_CHI = float(os.environ.get("TNO_VPROM_CHI", "0.25"))   # max chi / zon^2 (one-bright-night tracks fail)
++PROM_AS = float(os.environ.get("TNO_VPROM_AS", "3.0"))
++# linker-only rows (src "L") were built from single-exposure detections at ~5 sigma in these same exposures, so their
++# forced S/N is selection-biased upwards (sparse scenarios: every exposure); they need a higher zlbno to be promoted.
++PROM_DZL = float(os.environ.get("TNO_VPROM_DZL", "2"))
++
++
++def prom_target(f, src=None):
++    try:
++        z = float(f["zlbno"]); zo = float(f["zoff"]); zon = float(f["zon"]); chi = float(f["chi"])
++        npos = int(f["npos"])
++    except Exception:
++        return None
++    if not all(math.isfinite(x) for x in (z, zo, zon, chi)):
++        return None
++    z0 = PROM_Z0 + (PROM_DZL if src == "L" else 0.0)
++    if z < z0 or npos < PROM_NP or zo > max(3.0, 0.5 * z) or chi > PROM_CHI * max(zon, 1.0) ** 2 + 4.0:
++        return None
++    return PROM_P0 + (PROM_P1 - PROM_P0) * min(1.0, (z - z0) / max(PROM_Z1 - PROM_Z0, 1e-6))
++
++
++def vet_promote(cs):
++    try:
++        cs = sorted(cs, key=lambda c: -float(c["p"]))
++        tgt = [prom_target(c["vet"], c.get("src")) if c.get("vet") else None for c in cs]
++        cand = [i for i, q in enumerate(tgt) if q is not None and q > float(cs[i]["p"])]
++        if not cand or EXPT is None:
++            return cs
++        t_, o_, nid = EXPT
++        U = {}
++
++        def u(i):
++            if i not in U:
++                U[i] = orbit.predict_dirs(np.array(cs[i]["state"], float), float(cs[i]["epoch_mjd"]), t_, o_)
++            return U[i]
++        cosm = math.cos(PROM_AS * ARC)
++        nn = int(nid.max()) + 1
++        newp = [float(c["p"]) for c in cs]
++        prom, dup = [], 0
++        for i in sorted(cand, key=lambda i: -tgt[i]):
++            q = tgt[i]
++            above = [k for k in range(len(cs)) if k != i and (k < i or newp[k] >= q)]   # cs is in old p order
++            isdup = False
++            ui = u(i)
++            for k in above:
++                close = np.einsum("ed,ed->e", u(k), ui) > cosm
++                if len({int(x) for x in nid[close]}) >= 2:
++                    isdup = True
++                    break
++            if isdup:
++                dup += 1
++                continue
++            newp[i] = q
++            prom.append(i)
++        log(f"vprom: {len(prom)} rows promoted (old ranks {sorted(prom)[:30]}), {dup} skipped as partial duplicates")
++        out = [dict(c, p=p) for c, p in zip(cs, newp)]
++        return sorted(out, key=lambda c: -float(c["p"]))
++    except Exception as ex:
++        log("vprom failed", ex)
++        return cs
++
++
+ VET_LO = float(os.environ.get("TNO_VET_LO", "1.5"))     # zlbno at/below which p gets the floor factor
+ VET_HI = float(os.environ.get("TNO_VET_HI", "4.5"))     # zlbno at/above which p is unchanged
+ VET_FL = float(os.environ.get("TNO_VET_FL", "0.5"))     # floor factor
+@@ -239,6 +311,13 @@
+     head, tail = cs[:VET_N], cs[VET_N:]
+     nw = 4 if not os.environ.get("TNO_VET_W") else int(os.environ["TNO_VET_W"])
+     fs = vet_.measure(scen, head, deadline=deadline, log=log, workers=nw)
++    if os.environ.get("TNO_VET_DUMP"):   # gen 133: analysis sidecar (finder p, src, state, vet features)
++        try:
++            json.dump([{"p": float(c["p"]), "src": c.get("src"), "state": [float(x) for x in c["state"]],
++                        "epoch_mjd": float(c["epoch_mjd"]), "f": f} for c, f in zip(head, fs)],
++                      open(os.environ["TNO_VET_DUMP"], "w"))
++        except Exception as ex:
++            log("vet dump failed", ex)
+     return vet_adjust(head, fs) + tail
+ 
+ 
+--- history/gen132/submission/vet.py	2026-11-08 05:34:21
++++ submission/vet.py	2026-11-08 06:53:07
+@@ -362,7 +362,8 @@
+         else:
+             chi = 0.0
+         feats.append({"zon": zon, "zlbno": zlbno, "zoff": zoff, "zoffmax": zoffmax, "npos": npos, "nnight": nn,
+-                      "chi": chi, "nexp": int(ok.sum())})
++                      "chi": chi, "nexp": int(ok.sum()),
++                      "zn": [None if not np.isfinite(x) else round(float(x), 3) for x in zn]})
+     log(f"vet: {C} candidates x {E} exposures in {time.time() - t_start:.1f}s; measured {sum(f is not None for f in feats)}")
+     return feats
+ 

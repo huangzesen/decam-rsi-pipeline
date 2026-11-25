@@ -1,0 +1,232 @@
+--- history/gen115/submission/finder.py	2026-11-06 09:13:22
++++ submission/finder.py	2026-11-07 03:38:25
+@@ -156,13 +156,32 @@
+     print(f"[wrap {time.time() - T0:6.1f}s]", *a, flush=True)
+ 
+ 
+-def run(sub, scen, out, budget, hard, env=None):
++def start(sub, scen, out, budget, hard, env=None, nice=0):
+     cmd = [sys.executable, "-I", os.path.join(HERE, sub, "finder.py"), "--scenario", scen, "--out", out,
+            "--budget-s", f"{budget:.1f}"]
+-    log("start", sub, f"budget {budget:.0f}s, hard stop {hard:.0f}s")
++    log("start", sub, f"budget {budget:.0f}s, hard stop {hard:.0f}s" + (f", nice {nice}" if nice else ""))
++    pre = None
++    if nice:
++        def pre():
++            # runs after setsid (start_new_session): on Linux with autogroup, nice alone only ranks processes inside
++            # the new session, so also lower the session's autogroup priority.
++            try:
++                os.nice(nice)
++            except Exception:
++                pass
++            try:
++                with open("/proc/self/autogroup", "w") as f_:
++                    f_.write(str(nice))
++            except Exception:
++                pass
++    return subprocess.Popen(cmd, cwd=os.path.join(HERE, sub), start_new_session=True,
++                            env=dict(os.environ, **(env or {})), preexec_fn=pre)
++
++
++def run(sub, scen, out, budget, hard, env=None, p=None):
+     t = time.time()
+-    p = subprocess.Popen(cmd, cwd=os.path.join(HERE, sub), start_new_session=True,
+-                         env=dict(os.environ, **(env or {})))
++    if p is None:
++        p = start(sub, scen, out, budget, hard, env)
+     try:
+         p.wait(timeout=max(5.0, hard))
+     except subprocess.TimeoutExpired:
+@@ -328,8 +347,40 @@
+     # gen 101: the linker skips its own pair-seeded stack.py (TNO_LNOSTACK=1), so the time it would use goes to stackd,
+     # the GPU orbit-space stack (night/window/deep seeds).  0 = gen100.
+     lenv = {"TNO_NOSTACK": "1"} if int(float(os.environ.get("TNO_LNOSTACK", "0") or 0)) else None
+-    run("linker", scen, outL, bl, bl + 15, env=lenv)
++    # gen 116: concurrent mode.  The GPU idles while the CPU-bound linker runs (~75 % of a sparse scenario's budget),
++    # so stackd starts at t=0 with (almost) the whole budget instead of the ~25 % left after the linker.  It does its
++    # mapping/template/fstk/window search alongside the linker and waits for the linker's final output (marker file)
++    # before refinement, so the linker seeds are refined exactly as before.  TNO_CONC=0 = gen115.
++    conc = int(float(os.environ.get("TNO_CONC", "1") or 0))
++    doneL = outL + ".done"
++    pS = None
++    if conc:
++        for f_ in (doneL, outL, outS):   # a stale marker would make stackd skip its wait
++            try:
++                os.remove(f_)
++            except Exception:
++                pass
++        bsc = B - (time.time() - T0) - 14
++        senv = {"TNO_SEEDS": outL, "TNO_SEEDS_WAIT": doneL}
++        senv["TNO_CONC_WORKERS"] = os.environ.get("TNO_CONC_WORKERS", "4")   # used on CUDA (Mac: 2, stackd/finder.py)
++        pS = start("stackd", scen, outS, bsc, bsc + 6, env=senv,
++                   nice=int(float(os.environ.get("TNO_CONC_NICE", "15") or 0)))
++        tS0 = time.time()
++    try:
++        run("linker", scen, outL, bl, bl + 15, env=lenv)
++    except BaseException:
++        if pS is not None:   # do not leave stackd running on the GPU
++            try:
++                os.killpg(pS.pid, signal.SIGKILL)
++            except Exception:
++                pass
++        raise
+     A = load(outL)
++    if conc:
++        try:
++            open(doneL, "w").write("done")
++        except Exception as ex:
++            log("marker failed", ex)
+     try:
+         write(out, merge(A, [], night_t, night_o))
+     except Exception as ex:
+@@ -338,7 +389,17 @@
+             shutil.copy(outL, out)
+     # 2. stack (in what is left)
+     bs = B - (time.time() - T0) - 12
+-    if bs >= 60:
++    if conc:
++        run("stackd", scen, outS, 0, max(5.0, bsc + 6 - (time.time() - tS0)), p=pS)
++        S = load(outS)
++        try:
++            final = write(out, merge(A, S, night_t, night_o))
++            log(f"final {len(final)} candidates; top p {[round(c['p'], 3) for c in final[:8]]}")
++        except Exception as ex:
++            import traceback
++            traceback.print_exc()
++            log("merge failed; keeping linker output", ex)
++    elif bs >= 60:
+         run("stackd", scen, outS, bs, bs + 6, env={"TNO_SEEDS": outL} if os.path.exists(outL) else None)
+         S = load(outS)
+         try:
+@@ -350,7 +411,7 @@
+             log("merge failed; keeping linker output", ex)
+     else:
+         log("no time left for the stack stage")
+-    for f in (() if os.environ.get("TNO_KEEP") else (outL, outS)):
++    for f in (() if os.environ.get("TNO_KEEP") else (outL, outS, doneL)):
+         try:
+             os.remove(f)
+         except Exception:
+--- history/gen115/submission/stackd/finder.py	2026-11-06 14:56:50
++++ submission/stackd/finder.py	2026-11-07 03:43:16
+@@ -37,9 +37,26 @@
+         ncpu = len(os.sched_getaffinity(0))
+     except Exception:
+         ncpu = os.cpu_count() or 4
++    if os.environ.get("TNO_SEEDS_WAIT"):   # gen 116 concurrent mode: leave the CPU to the linker
++        return 2 if not cuda else max(1, int(os.environ.get("TNO_CONC_WORKERS", "4")))
+     return int(max(2, min(7, ncpu - 1))) if cuda else int(max(1, min(4, ncpu)))
+ 
+ 
++# gen 116: in concurrent mode stackd refines ~3x more window (kind-2) seeds; the later ones are weaker, so a null built
++# from all of them has a lower median and every z (and p) rises (Mac inj7d: top stack p 0.85 -> 0.99).  The null is
++# therefore the first NULL_FRAC of the refined kind-2 seeds in refinement order (~the sequential mode's count).
++NULL_FRAC = float(os.environ.get("TNO_NULL_FRAC", "") or (0.35 if os.environ.get("TNO_SEEDS_WAIT") else 1.0))
++
++
++def k2null(kd):
++    kd = np.asarray(kd)
++    m = kd == 2
++    if NULL_FRAC < 1 and m.sum() >= 30:
++        n0 = max(30, int(round(NULL_FRAC * m.sum())))
++        m = m & (np.cumsum(m) <= n0)
++    return m
++
++
+ def tframe(u0):
+     u0 = u0 / np.linalg.norm(u0)
+     ex = np.cross([0, 0, 1.0], u0); ex /= np.linalg.norm(ex)
+@@ -287,7 +304,8 @@
+             continue
+         med = torch.median(s); sd = 1.4826 * torch.median(torch.abs(s - med))
+         maps[n] = ((m.float() - med) / torch.clamp(sd, min=1e-3)).to(torch.float16)
+-    maps = torch.where(cov, maps, torch.zeros_like(maps))
++    for n_ in range(maps.shape[0]):   # gen 116: in place, per frame (was torch.where: ~2 extra map-sized tensors)
++        maps[n_].masked_fill_(~cov[n_], 0)
+     # static sources: > 4 on >= 2 nights (dilated by 1 px)
+     nn = torch.zeros((H, W), dtype=torch.int16, device=dev)
+     # gen 20: bins = clusters of exposures separated by gaps > 0.06 d (was fixed 0.06-d boundaries, which split one
+@@ -452,8 +470,11 @@
+             del Tm, Vm
+         except Exception as ex:
+             log("template failed, skipped:", repr(ex)[:200])
+-    maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
++    for n_ in range(maps.shape[0]):   # gen 116: in place, per frame (same values as the torch.where it replaces)
++        maps[n_].masked_fill_(static, 0).clamp_(-3, 5)
+     del nn, static
++    if cuda:
++        torch.cuda.empty_cache()
+     write_out(a.out, [])
+ 
+     # ---------------------------------------------------------------- 3. search window
+@@ -1069,6 +1090,16 @@
+     # gen 12e: linker candidates (wrapper passes their OUT file in TNO_SEEDS) are refined first, on all exposures,
+     # so the wrapper's merge can confirm (boost) them with pixel-level evidence or correct their orbits.
+     Ls = []
++    # gen 116: concurrent mode (wrapper TNO_CONC): this run started at t=0 next to the CPU-bound linker, so wait here
++    # (search done, refinement not started) until the wrapper marks the linker's output final, at most until
++    # TNO_SEEDS_WAITF x budget.
++    wf_ = os.environ.get("TNO_SEEDS_WAIT")
++    if wf_:
++        tw_ = time.time()
++        wdl_ = budget * float(os.environ.get("TNO_SEEDS_WAITF", "0.80"))
++        while not os.path.exists(wf_) and time.time() - T0 < wdl_:
++            time.sleep(0.5)
++        log(f"conc: waited {time.time() - tw_:.0f}s for linker seeds ({'ready' if os.path.exists(wf_) else 'NOT ready'})")
+     try:
+         sf = os.environ.get("TNO_SEEDS")
+         if sf and os.path.exists(sf):
+@@ -1327,7 +1358,7 @@
+         try:
+             # gen 31 (v2): null population = refined window seeds (night/linker seeds are mostly real bodies)
+             if kd is not None and int((kd == 2).sum()) >= 30:
+-                ref_ = sc[kd == 2]
++                ref_ = sc[k2null(kd)]
+             elif kd is not None and int((kd >= 2).sum()) >= 30:
+                 ref_ = sc[kd >= 2]
+         except Exception:
+@@ -1343,7 +1374,7 @@
+             if RCLIP > 0 and kd is not None and scq is not None and len(kd) == len(S) == len(scq) and (kd == 3).any():
+                 scq = np.asarray(scq, float)
+                 if int((kd == 2).sum()) >= 30:
+-                    rq_ = scq[kd == 2]
++                    rq_ = scq[k2null(kd)]
+                 elif int((kd >= 2).sum()) >= 30:
+                     rq_ = scq[kd >= 2]
+                 else:
+@@ -1358,7 +1389,7 @@
+         n3n = None
+         try:
+             if N3 > 0 and n3 is not None and kd is not None and len(n3) == len(S) and int((kd == 2).sum()) >= 30:
+-                r3 = n3[kd == 2]; m3 = np.median(r3); n3n = (m3, 1.4826 * np.median(np.abs(r3 - m3)) + 1e-3)
++                r3 = n3[k2null(kd)]; m3 = np.median(r3); n3n = (m3, 1.4826 * np.median(np.abs(r3 - m3)) + 1e-3)
+         except Exception:
+             n3n = None
+         for j in range(len(S)):
+@@ -1803,7 +1834,7 @@
+                 Sb = np.array(BPS); vb_, cb_ = score_states(Sb)
+                 tb_ = total(vb_, cb_); gb_ = nights_good(vb_, cb_)
+                 rk2, rs2 = np.array(rkd), np.array(rsc)
+-                ref_ = rs2[rk2 == 2] if int((rk2 == 2).sum()) >= 30 else rs2
++                ref_ = rs2[k2null(rk2)] if int((rk2 == 2).sum()) >= 30 else rs2
+                 med_ = np.median(ref_); mad_ = 1.4826 * np.median(np.abs(ref_ - med_)) + 1e-3
+                 BPW = float(os.environ.get("TNO_BP_W", "0.5"))
+                 add = []
+@@ -2773,7 +2804,7 @@
+     RX2 = os.environ.get("TNO_RANKX2", "1") != "0"
+     W_ = float(os.environ.get("TNO_RANKX_W", RX2_W if RX2 else "0.5"))
+     MODE_ = os.environ.get("TNO_RANKX_MODE", RX2_MODE if RX2 else "min")
+-    nm_ = (rkd == 2) if (rkd == 2).sum() >= 30 else (rkd >= 2)
++    nm_ = k2null(rkd) if (rkd == 2).sum() >= 30 else (rkd >= 2)
+     if nm_.sum() < 30:
+         log_("rankx: null too small; skipped")
+         return cands
+@@ -2915,7 +2946,7 @@
+         return np.array(out)
+ 
+     t0 = time.time()
+-    nm_ = (rkd == 2) if (rkd == 2).sum() >= 30 else (rkd >= 2)
++    nm_ = k2null(rkd) if (rkd == 2).sum() >= 30 else (rkd >= 2)
+     nul = R[nm_] if nm_.sum() >= 30 else R
+     rr = np.random.default_rng(7)
+     nul = nul[rr.permutation(len(nul))[:int(os.environ.get("TNO_CV_NNULL", "60"))]]

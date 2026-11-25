@@ -1,0 +1,242 @@
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/finder.py submission/finder.py
+--- history/gen146/submission/finder.py	2026-11-08 22:16:24
++++ submission/finder.py	2026-11-09 05:41:22
+@@ -609,6 +609,19 @@
+     # gen 101: the linker skips its own pair-seeded stack.py (TNO_LNOSTACK=1), so the time it would use goes to stackd,
+     # the GPU orbit-space stack (night/window/deep seeds).  0 = gen100.
+     lenv = {"TNO_NOSTACK": "1"} if int(float(os.environ.get("TNO_LNOSTACK", "0") or 0)) else None
++    # gen 148: an EXCLUSIVE_PROCESS GPU (gen147 scored 0.0376 on Lonestar6) lets only one process hold a CUDA context.
++    # Then only stackd's main process uses the GPU; detection/map workers and the linker run on the CPU
++    # (gpupolicy.py), and the linker skips its own GPU-sized mosaic stack (gen101 measured that neutral).
++    if "TNO_GPU_EXCL" not in os.environ:
++        try:
++            import gpupolicy
++            ex_, modes_ = gpupolicy.detect_exclusive()
++            os.environ["TNO_GPU_EXCL"] = "1" if ex_ else "0"
++            log(f"GPU compute modes {modes_} -> exclusive={ex_}")
++        except Exception as ex:
++            log("compute-mode query failed", ex)
++    if os.environ.get("TNO_GPU_EXCL") == "1":
++        lenv = dict(lenv or {}, TNO_NOSTACK="1")
+     # gen 116: concurrent mode.  The GPU idles while the CPU-bound linker runs (~75 % of a sparse scenario's budget),
+     # so stackd starts at t=0 with (almost) the whole budget instead of the ~25 % left after the linker.  It does its
+     # mapping/template/fstk/window search alongside the linker and waits for the linker's final output (marker file)
+Only in submission: gpupolicy.py
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/linker/detect.py submission/linker/detect.py
+--- history/gen146/submission/linker/detect.py	2026-11-06 07:28:37
++++ submission/linker/detect.py	2026-11-09 05:56:21
+@@ -14,11 +14,8 @@
+         try:
+             import torch
+             torch.set_num_threads(1)
+-            dev = "cpu"
+-            if torch.backends.mps.is_available():
+-                dev = "mps"
+-            elif torch.cuda.is_available():
+-                dev = "cuda"
++            import gpupolicy   # gen 148: smoke-tested device, CPU when the GPU is exclusive / broken
++            dev = gpupolicy.pick(torch, "worker", ("mps", "cuda"))
+             _TORCH = (torch, dev)
+         except Exception:
+             _TORCH = (None, "cpu")
+@@ -84,7 +81,9 @@
+     m2 = torch.median(s2)
+     ns = 1.4826 * torch.median(torch.abs(s2 - m2))
+     snr = (snr - m2) / torch.clamp(ns, min=1e-6)
+-    peak = (snr == F.max_pool2d(snr, 5, 1, 2)) & (snr >= thresh) & okd
++    # gen 148: on the CPU (exclusive-GPU fallback) a separable 1x5 then 5x1 max is 3x faster and bit-identical
++    mp5 = F.max_pool2d(F.max_pool2d(snr, (1, 5), 1, (0, 2)), (5, 1), 1, (2, 0)) if dev == "cpu" else F.max_pool2d(snr, 5, 1, 2)
++    peak = (snr == mp5) & (snr >= thresh) & okd
+     ys, xs = torch.nonzero(peak[0, 0], as_tuple=True)
+     # keep away from edges
+     e = 3
+@@ -197,7 +196,22 @@
+             fwhm = float(h.get("FWHM") or 0) or 4.0
+             if not (1.5 < fwhm < 15):
+                 fwhm = 4.0
+-            r = process_ccd(img, msk, fwhm, thresh, want_map)
++            try:
++                r = process_ccd(img, msk, fwhm, thresh, want_map)
++            except Exception as ex_:
++                # gen 148: a device error (e.g. CUDA busy / lost / cuDNN) used to drop every CCD silently; retry it on
++                # the CPU and, if that works, keep the CPU for the rest of this worker's life.  Other errors: as before.
++                global _TORCH
++                import gpupolicy
++                if _TORCH is None or _TORCH[1] == "cpu" or not gpupolicy.device_error(ex_):
++                    raise
++                old_ = _TORCH
++                _TORCH = (old_[0], "cpu")
++                try:
++                    r = process_ccd(img, msk, fwhm, thresh, want_map)
++                except Exception:
++                    _TORCH = old_
++                    raise
+             if r is None:
+                 continue
+             d, sig, smap = r
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/linker/finder.py submission/linker/finder.py
+--- history/gen146/submission/linker/finder.py	2026-11-06 07:28:37
++++ submission/linker/finder.py	2026-11-09 05:57:28
+@@ -79,6 +79,10 @@
+     it = iter(tasks)
+     durs = []
+     done_sub = False
++    # gen 148: a task whose worker died (e.g. host OOM kill) never becomes ready, and multiprocessing.Pool replaces
++    # the worker but not the task, so the slot was lost until the hard stop.  A task running far longer than usual is
++    # moved to `stale` (still collected if it ever finishes) and its slot is reused.
++    stale = []
+     try:
+         while True:
+             # submit
+@@ -108,6 +112,22 @@
+                 else:
+                     still.append((ar, ts))
+             inflight = still
++            lim_ = max(240.0, 8.0 * float(np.median(durs))) if durs else 600.0
++            if any(time.time() - ts > lim_ for _, ts in inflight):
++                stale += [(ar, ts) for ar, ts in inflight if time.time() - ts > lim_]
++                inflight = [(ar, ts) for ar, ts in inflight if time.time() - ts <= lim_]
++                log(f"detection: {len(stale)} task(s) over {lim_:.0f}s marked stale; their slots are reused")
++            for ar, ts in list(stale):
++                if ar.ready():
++                    stale.remove((ar, ts))
++                    try:
++                        o = ar.get()
++                        results[o["ei"]] = o
++                        log(f"exp {o['ei']}: {len(o['det'])} det (stale task finished after {time.time() - ts:.1f}s)")
++                    except Exception as ex:
++                        log("worker error", ex)
++            if not inflight and done_sub:
++                break
+             if time.time() - T0 > deadline + 40:      # hard stop
+                 log("detection hard stop")
+                 break
+Only in submission/linker: gpupolicy.py
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/linker/hough.py submission/linker/hough.py
+--- history/gen146/submission/linker/hough.py	2026-11-06 07:28:37
++++ submission/linker/hough.py	2026-11-09 05:41:14
+@@ -16,11 +16,8 @@
+ 
+ def _dev():
+     import torch
+-    if torch.backends.mps.is_available():
+-        return torch, "mps"
+-    if torch.cuda.is_available():
+-        return torch, "cuda"
+-    return torch, "cpu"
++    import gpupolicy   # gen 148: smoke-tested device; CPU when the GPU is exclusive / broken
++    return torch, gpupolicy.pick(torch, "aux", ("mps", "cuda"))
+ 
+ 
+ def rate_grid(vof, T_h, dv_min=0.25, nmax=700):
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/linker/stack.py submission/linker/stack.py
+--- history/gen146/submission/linker/stack.py	2026-11-06 07:28:37
++++ submission/linker/stack.py	2026-11-09 05:41:14
+@@ -17,11 +17,8 @@
+ 
+ 
+ def _dev(torch):
+-    if torch.cuda.is_available():
+-        return "cuda"
+-    if torch.backends.mps.is_available():
+-        return "mps"
+-    return "cpu"
++    import gpupolicy   # gen 148: smoke-tested device; CPU when the GPU is exclusive / broken
++    return gpupolicy.pick(torch, "aux", ("cuda", "mps"))
+ 
+ 
+ def build_mosaics(torch, dev, FP, exps, F, lim):
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/stackd/finder.py submission/stackd/finder.py
+--- history/gen146/submission/stackd/finder.py	2026-11-09 02:27:12
++++ submission/stackd/finder.py	2026-11-09 05:41:14
+@@ -38,11 +38,8 @@
+ 
+ def device():
+     import torch
+-    if torch.cuda.is_available():
+-        return "cuda"
+-    if torch.backends.mps.is_available():
+-        return "mps"
+-    return "cpu"
++    import gpupolicy   # gen 148: smoke-tested device (retries ~20 s); the GPU owner even when it is exclusive
++    return gpupolicy.pick(torch, "main", ("cuda", "mps"))
+ 
+ 
+ def n_workers(cuda):
+Only in submission/stackd: gpupolicy.py
+diff -ru -x experiments -x NOTES.md -x __pycache__ history/gen146/submission/stackd/mapper.py submission/stackd/mapper.py
+--- history/gen146/submission/stackd/mapper.py	2026-11-07 07:02:14
++++ submission/stackd/mapper.py	2026-11-09 05:56:21
+@@ -15,11 +15,8 @@
+         try:
+             import torch
+             torch.set_num_threads(1)
+-            dev = "cpu"
+-            if torch.backends.mps.is_available():
+-                dev = "mps"
+-            elif torch.cuda.is_available():
+-                dev = "cuda"
++            import gpupolicy   # gen 148: smoke-tested device, CPU when the GPU is exclusive / broken
++            dev = gpupolicy.pick(torch, "worker", ("mps", "cuda"))
+             _TORCH = (torch, dev)
+         except Exception:
+             _TORCH = (None, "cpu")
+@@ -157,7 +154,9 @@
+     m2 = torch.median(s2)
+     ns = 1.4826 * torch.median(torch.abs(s2 - m2))
+     snr = (snr - m2) / torch.clamp(ns, min=1e-6)
+-    peak = (snr == F.max_pool2d(snr, 5, 1, 2)) & (snr >= thresh) & okd
++    # gen 148: on the CPU (exclusive-GPU fallback) a separable 1x5 then 5x1 max is 3x faster and bit-identical
++    mp5 = F.max_pool2d(F.max_pool2d(snr, (1, 5), 1, (0, 2)), (5, 1), 1, (2, 0)) if dev == "cpu" else F.max_pool2d(snr, 5, 1, 2)
++    peak = (snr == mp5) & (snr >= thresh) & okd
+     ys, xs = torch.nonzero(peak[0, 0], as_tuple=True)
+     # keep away from edges
+     e = 3
+@@ -270,7 +269,22 @@
+             fwhm = float(h.get("FWHM") or 0) or 4.0
+             if not (1.5 < fwhm < 15):
+                 fwhm = 4.0
+-            r = process_ccd(img, msk, fwhm, thresh, want_map)
++            try:
++                r = process_ccd(img, msk, fwhm, thresh, want_map)
++            except Exception as ex_:
++                # gen 148: a device error (e.g. CUDA busy / lost / cuDNN) used to drop every CCD silently; retry it on
++                # the CPU and, if that works, keep the CPU for the rest of this worker's life.  Other errors: as before.
++                global _TORCH
++                import gpupolicy
++                if _TORCH is None or _TORCH[1] == "cpu" or not gpupolicy.device_error(ex_):
++                    raise
++                old_ = _TORCH
++                _TORCH = (old_[0], "cpu")
++                try:
++                    r = process_ccd(img, msk, fwhm, thresh, want_map)
++                except Exception:
++                    _TORCH = old_
++                    raise
+             if r is None:
+                 continue
+             d, sig, smap = r
+@@ -413,7 +427,22 @@
+             if not (1.5 < fwhm < 15):
+                 fwhm = 4.0
+             sl_ = []
+-            pm = snr_pooled(img, msk, fwhm, sig_out=sl_)
++            try:
++                pm = snr_pooled(img, msk, fwhm, sig_out=sl_)
++            except Exception as ex_:
++                # gen 148: device error -> retry this CCD on the CPU and stay there if that works (was: CCD dropped)
++                global _TORCH
++                import gpupolicy
++                if _TORCH is None or _TORCH[1] == "cpu" or not gpupolicy.device_error(ex_):
++                    raise
++                old_ = _TORCH
++                _TORCH = (old_[0], "cpu")
++                try:
++                    sl_ = []
++                    pm = snr_pooled(img, msk, fwhm, sig_out=sl_)
++                except Exception:
++                    _TORCH = old_
++                    raise
+             if pm is None:
+                 continue
+             maps.append((ccd_geom(WCS(h), img.shape), pm))

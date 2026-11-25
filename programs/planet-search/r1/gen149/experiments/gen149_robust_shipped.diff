@@ -1,0 +1,96 @@
+--- history/gen146/submission/finder.py	2026-11-08 22:16:24
++++ submission/finder.py	2026-11-09 07:49:58
+@@ -171,7 +171,7 @@
+     """Monotone within the scenario (both terms fall with rank), so the scenario's own order is unchanged.  Across
+     scenarios, the low-p tail (p ~ 0.02-0.06, set mostly by each scenario's raw score scale) is ordered by rank,
+     so every scenario gets ~its top 20-30 into the global cut instead of one scenario's tail taking the slots."""
+-    cs = sorted(cs, key=lambda c: -float(c["p"]))
++    cs = sorted([dict(c, p=_pfin(c.get("p", 0.0))) for c in cs], key=lambda c: -c["p"])   # gen 149: NaN-safe
+     if RANK_Q0 <= 0:
+         return cs
+     out = []
+@@ -430,8 +430,8 @@
+ 
+ 
+ def merge(A, B, night_t, night_o):
+-    A = [dict(c, src="L") for c in A if valid(c)]
+-    B = [dict(c, src="S") for c in B if valid(c)]
++    A = [dict(c, src="L", p=_pfin(c.get("p", 0.0))) for c in A if valid(c)]   # gen 149: NaN-safe p before any sort
++    B = [dict(c, src="S", p=_pfin(c.get("p", 0.0))) for c in B if valid(c)]
+     for c in B:
+         c["p"] = float(c["p"]) * STACK_W
+     if not B:
+@@ -529,15 +529,47 @@
+         return [cs[k] for k in keep]
+     except Exception as ex:
+         log("sky dedup failed", ex)
++        return cs
++
++
++def _pfin(p):
++    """gen 149: p clamped to [0, 1]; NaN/inf/garbage -> 0 (min/max let a NaN p through to OUT.json)."""
++    try:
++        p = float(p)
++    except Exception:
++        return 0.0
++    return float(min(max(p, 0.0), 1.0)) if math.isfinite(p) else 0.0
++
++
++# gen 149 (TNO_FLOOD, default 1; 0 = gen146): the grader keeps only the 25 x N highest-p rows over ALL scenarios, so a
++# scenario whose p calibration breaks (degenerate null, broken maps/vet on an unfamiliar machine) and emits ~200 junk rows
++# at high p takes the slots of every other scenario (one plausible cause of gen147's 0.04).  Healthy outputs (dev and
++# injected runs) have p <= 0.28 at rank 50 and <= 0.12 at rank 100; if p at rank FLOOD_R (60) is above FLOOD_P (0.5)
++# the scenario is treated as flooded and rows from rank 25 on are capped by a healthy envelope
++# 0.6 exp(-(r - 25) / 40) (rank 60: 0.25, rank 100: 0.09).  Order is unchanged; never fires on a healthy run.
++FLOOD = int(float(os.environ.get("TNO_FLOOD", "1") or 0))
++FLOOD_R = int(float(os.environ.get("TNO_FLOOD_R", "60")))
++FLOOD_P = float(os.environ.get("TNO_FLOOD_P", "0.5"))
++
++
++def flood_guard(cs):
++    if not FLOOD or len(cs) <= FLOOD_R or float(cs[FLOOD_R]["p"]) <= FLOOD_P:
+         return cs
++    out = []
++    for r, c in enumerate(cs):
++        if r >= 25:
++            c = dict(c, p=min(float(c["p"]), 0.6 * math.exp(-(r - 25) / 40.0)))
++        out.append(c)
++    log(f"flood guard: p at rank {FLOOD_R} was {float(cs[FLOOD_R]['p']):.3f} > {FLOOD_P}; tail capped")
++    return out
+ 
+ 
+ def write(path, cs):
+-    cs = rank_balance(cs)[:200]
++    cs = flood_guard(rank_balance(cs)[:200])
+     out = []
+     for c in cs:
+         d = {"epoch_mjd": float(c["epoch_mjd"]), "state": [float(x) for x in c["state"]],
+-             "p": float(min(max(float(c["p"]), 0.0), 1.0))}
++             "p": _pfin(c.get("p", 0.0))}
+         if c.get("mag") is not None:
+             try:
+                 m = float(c["mag"])
+--- history/gen146/submission/vet.py	2026-11-08 22:00:28
++++ submission/vet.py	2026-11-09 07:38:37
+@@ -416,8 +416,19 @@
+     ne = np.array([nidx[nt[e]] for e in sel])
+     feats = []
+     if ncomp < E:
+-        log(f"vet: only {ncomp} of {E} exposures complete; features dropped")
+-        return [None] * C
++        # gen 149: an exposure cut by the deadline (or a read error) used to drop EVERY candidate's features, so the
++        # scenario went unvetted (junk kept its full p in the global cut) whenever one worker straggled.  Now only the
++        # incomplete exposures are masked (they look like off-footprint exposures, already handled), as long as at
++        # least 3/4 of the exposures (and 2) are complete.  TNO_VET_PART=0 = gen146 behaviour.
++        cmp_ = np.array([bool(rr[1]) for rr in res])
++        if os.environ.get("TNO_VET_PART", "1") == "0" or ncomp < max(2, 0.75 * E):
++            log(f"vet: only {ncomp} of {E} exposures complete; features dropped")
++            return [None] * C
++        on[:, ~cmp_] = np.nan
++        off[:, ~cmp_, :] = np.nan
++        sqd[:, ~cmp_] = np.nan
++        wgt = sqd * gz[None, :]
++        log(f"vet: {E - ncomp} of {E} exposures incomplete; masked")
+     for c in range(C):
+         o = on[c]
+         ok = np.isfinite(o)

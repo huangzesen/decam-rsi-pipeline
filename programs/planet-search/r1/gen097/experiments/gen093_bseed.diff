@@ -1,0 +1,52 @@
+diff -ruN -x experiments -x __pycache__ $RSI_SANDBOX/r1/gen093/workspace/submission/NOTES.md submission/NOTES.md
+--- $RSI_SANDBOX/r1/gen093/workspace/submission/NOTES.md	2026-11-05 15:06:43
++++ submission/NOTES.md	2026-11-05 15:06:41
+@@ -1,13 +1,6 @@
+ Family: hybrid: detect-then-link (gen009b) + orbit-space GPU shift-and-stack (gen009d), outputs merged
+-Base: gen092 (= gen085 code + TNO_DROPNZP, reward 0.2180, A100)
+-Change: none to the program yet (gen092 code resubmitted); session in progress.
+-
+-# TNO finder, generation 93 (1-hour session)
+-
+-(in progress)
+-
+-## Base notes (gen092)
+-
++Base: gen091 (= gen085 code, reward 0.2180, A100)
++Change: stackd drops exposures with an empty magzero (failed CP photometric calibration) when they are <= 25 % of the exposures and >= 4 exposures on >= 3 nights remain; the linker still uses every exposure (TNO_DROPNZP=1, 0 = gen085).
+ 
+ # TNO finder, generation 92 (1-hour session)
+ 
+diff -ruN -x experiments -x __pycache__ $RSI_SANDBOX/r1/gen093/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen093/workspace/submission/stackd/finder.py	2026-11-05 14:24:52
++++ submission/stackd/finder.py	2026-11-05 15:08:53
+@@ -1725,17 +1725,25 @@
+     max-pooled) night co-add there; require >= 3 nights with value >= 2.5.  Returns (rows, frames) where rows are
+     (score, d, vx, vy, px, py, local frame index) like the window search's and frames are (TD, tref, oref)."""
+     from scipy.spatial import cKDTree
+-    NZ = float(os.environ.get("TNO_NS_Z", "3.7"))
++    # gen 93 (TNO_BSEED, 0 = gen092): the d-frame pairing already removes the observer's parallax, but it allowed an
++    # intrinsic rate up to 0.75 x the circular speed around the circular-orbit prediction.  Bound TNOs at 28-75 au
++    # (inc <~ 20 deg, e <~ 0.3) sit within ~0.35 vcs of it, so a 0.4 ring cuts the pair area ~3.5x.  The saved pairing
++    # cost buys a lower night-peak threshold and a larger cap (weight-2 bodies have night co-add S/N ~3.7-4.5), and
++    # a 3-night peak triplet gate (peaks within TOL on >= 3 nights) keeps the extra noise pairs out of the rows.
++    BSEED = os.environ.get("TNO_BSEED", "1") != "0"
++    NZ = float(os.environ.get("TNO_NS_Z", "3.45" if BSEED else "3.7"))
+     # gen 51: pair search + forced read-out on the GPU (opt-in TNO_NS_GPU=1; default = gen050 cKDTree/numpy path), so a large
+     # night-peak cap fits (gen050: B bodies with peaks on >= 3 nights 4/15 at cap 1500, 12/15 at 12000).
+     GPUP = os.environ.get("TNO_NS_GPU", "0") == "1"
+-    CAP = int(os.environ.get("TNO_NS_CAP", "0") or 0) or ((12000 if GPUP else 4000) if str(dev).startswith("cuda") else 1500)
++    CAP = int(os.environ.get("TNO_NS_CAP", "0") or 0) or ((12000 if GPUP else (8000 if BSEED else 4000)) if str(dev).startswith("cuda")
++                                                          else (4500 if BSEED else 1500))
+     TOL = float(os.environ.get("TNO_NS_TOL", "2.5")) * ARCR     # pairing tolerance (rad, 1"/px grid)
+     GOOD = float(os.environ.get("TNO_NS_GOOD", "2.5"))
+-    TRIP = int(os.environ.get("TNO_NS_TRIP", "0") or 0)          # gen 52: nights with a matching peak required
++    TRIP = int(os.environ.get("TNO_NS_TRIP", "3" if BSEED else "0") or 0)          # gen 52: nights with a matching peak required
+     TRT = float(os.environ.get("TNO_NS_TRT", "1.0"))            # peak match radius in units of TOL
+     SCMIN = float(os.environ.get("TNO_NS_SCMIN", "0") or 0)      # min forced night-sum score
+-    VRAD = 0.75
++    VRAD = float(os.environ.get("TNO_NS_VRAD", "0.4" if BSEED else "0.75"))
++    log_(f"night seeds: BSEED={int(BSEED)} NZ={NZ} CAP={CAP} TRIP={TRIP} VRAD={VRAD}")
+     nu = np.unique(night)
+     if len(nu) < 3:
+         return [], []

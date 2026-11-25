@@ -1,0 +1,129 @@
+--- $RSI_SANDBOX/r1/gen141/workspace/submission/stackd/fstk.py	2026-11-08 17:44:28
++++ armC/stackd/fstk.py	2026-11-08 18:55:25
+@@ -78,6 +78,13 @@
+     NATWN = int(float(os.environ.get("TNO_FSTK_NATWN", "15000" if _cu else "8000") or 0))
+     NATWC = int(float(os.environ.get("TNO_FSTK_NATWC", "15000" if _cu else "4000") or 0))
+     NATWX = int(float(os.environ.get("TNO_FSTK_NATWX", "3000" if _cu else "1500") or 0))
++    # gen 141 (TNO_FSTK_NATI, default 1; 0 = gen140): the native statistic samples each frame by BILINEAR interpolation of
++    # the clipped 1" cells around the exact sub-pixel track position (covered corners only, weights renormalised; a frame
++    # counts only where its nearest cell is covered, as in gen140), minus a per-frame null mean and rescaled per frame so
++    # its null sd equals the nearest-cell sample's (scores stay on gen140's scale).  Null mean / sd from random sub-pixel
++    # positions per frame (_nat_null).  Toy (experiments/gen141_natinterp_toy.py, DECam 0.263"/px, FWHM 3.4-5.6 px, 4x4
++    # max-pool, 12 frames): S/N at the true position +11-12 %, after a 25-position grid max +7 %, vs nearest.
++    NATI = NAT and os.environ.get("TNO_FSTK_NATI", "1") != "0"
+     probes = []
+     PROBE_OLD = os.environ.get("TNO_FSTK_PROBE_OLD", "0") == "1"   # gen 127: 1 = gen126's (wrong at d != r) probe position
+     try:
+@@ -500,6 +507,16 @@
+                         if len(on_):
+                             if nat_mu[0] is None:
+                                 nat_mu[0] = _nat_med(torch, maps, NCLIP)
++                                if NATI:
++                                    try:
++                                        t_i0 = time.time()
++                                        mbl_, scl_ = _nat_null(torch, dev, maps, NCLIP, nat_mu[0])
++                                        nat_mu[0] = (nat_mu[0], mbl_, scl_)
++                                        log(f"fstk natinterp: bilinear native sampling on ({time.time() - t_i0:.1f}s), null mean "
++                                            f"median {np.median(mbl_):.3f}, sd ratio nn/bl median {np.median(scl_):.3f} "
++                                            f"(range {scl_.min():.3f}-{scl_.max():.3f})")
++                                    except Exception as exi:
++                                        log("fstk natinterp null failed, nearest sampling:", repr(exi)[:200])
+                             if NATW:
+                                 try:
+                                     t_w0 = time.time()
+@@ -784,8 +801,81 @@
+     return b2, ex1 + ex2, ey1 + ey2, evx1 + evx2, evy1 + evy2
+ 
+ 
++_NATI_FAIL = [0]
++
++
+ def _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, clip, mu, gp, gv):
+-    """gen 139: one local-grid pass of _natscore (position offsets gp cells, velocity offsets gv cells/day)."""
++    """gen 141 dispatcher: mu = per-frame medians (gen140 nearest-cell sampling) or a tuple (medians, bilinear null mean,
++    nn/bl sd ratio) from TNO_FSTK_NATI -> bilinear sampling; any exception there falls back to the gen140 path."""
++    if isinstance(mu, tuple) and _NATI_FAIL[0] >= 3:   # repeated failure: stop retrying (each retry doubles the cost)
++        mu = mu[0]
++    if isinstance(mu, tuple):
++        try:
++            return _natgrid0(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy,
++                             clip, mu[0], gp, gv, bl=(mu[1], mu[2]))
++        except Exception as ex:
++            _NATI_FAIL[0] += 1
++            if _NATI_FAIL[0] <= 3:
++                print("fstk natinterp grid failed, nearest sampling:", repr(ex)[:200], flush=True)
++            mu = mu[0]
++    return _natgrid0(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, clip, mu, gp, gv)
++
++
++def _nat_null(torch, dev, maps, clip, med, nsamp=40000, seed=141):
++    """gen 141 (TNO_FSTK_NATI): per-frame null of the bilinear sample, at random sub-pixel positions whose nearest cell is
++    covered (frames with < 500 such samples keep the gen140 median, scale 1).  Returns (mean of the bilinear sample, sd(nearest sample) / sd(bilinear sample)) per frame."""
++    N, H, W = maps.shape
++    rg = np.random.default_rng(seed)
++    mbl = np.array(med, float).copy(); scl = np.ones(N)
++    U = torch.tensor(rg.uniform(0, W - 1, nsamp), dtype=torch.float32, device=dev)
++    V = torch.tensor(rg.uniform(0, H - 1, nsamp), dtype=torch.float32, device=dev)
++    flat = maps.reshape(N, -1)
++    for k in range(N):
++        b_, okn, vn = _bilin(torch, flat[k], U, V, H, W, clip)
++        if int(okn.sum()) < 500:
++            continue
++        b_ = b_[okn]; vn = vn[okn]
++        sb = float(b_.std()); sn = float(vn.std())
++        mbl[k] = float(b_.mean())
++        if np.isfinite(sb) and np.isfinite(sn) and sb > 1e-3 and sn > 1e-3:
++            scl[k] = min(max(sn / sb, 0.5), 3.0)
++    return mbl, scl
++
++
++def _bilin(torch, fk, U, V, H, W, clip):
++    """gen 141: bilinear sample of one frame's flat 1" map fk at float pixel coords (U, V) (any shape), over covered
++    (non-zero) corners with renormalised weights, values clipped at +-clip.  Returns (bilinear value, nearest-cell covered
++    mask, nearest-cell clipped value)."""
++    U0 = torch.floor(U); V0 = torch.floor(V)
++    fu = U - U0; fv = V - V0
++    num = torch.zeros_like(U); den = torch.zeros_like(U)
++    vn = torch.zeros_like(U); okn = torch.zeros(U.shape, dtype=torch.bool, device=U.device)
++    nu_ = fu >= 0.5; nv_ = fv >= 0.5
++    for a in (0, 1):
++        wa = fu if a else 1.0 - fu
++        cu = U0 + a
++        ia = (cu >= 0) & (cu <= W - 1)
++        for b in (0, 1):
++            wb = fv if b else 1.0 - fv
++            cv = V0 + b
++            ins = ia & (cv >= 0) & (cv <= H - 1)
++            idx = cv.clamp(0, H - 1).to(torch.int64) * W + cu.clamp(0, W - 1).to(torch.int64)
++            val = fk[idx].float()
++            c = ins & (val != 0)
++            vc = val.clamp(-clip, clip)
++            w = torch.where(c, wa * wb, torch.zeros_like(U))
++            num.add_(w * vc); den.add_(w)
++            isn = (nu_ == bool(a)) & (nv_ == bool(b))
++            okn = okn | (isn & c)
++            vn = torch.where(isn & c, vc, vn)
++            del idx, val, c, vc, w, isn, ins
++    return num / den.clamp(min=1e-6), okn, vn
++
++
++def _natgrid0(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, clip, mu, gp, gv,
++              bl=None):
++    """gen 139: one local-grid pass of _natscore (position offsets gp cells, velocity offsets gv cells/day).  gen 141: bl =
++    (per-frame null mean, sd ratio) -> bilinear sampling (TNO_FSTK_NATI); None = gen140 nearest-cell sampling."""
+     N, H, W = maps.shape
+     n = len(xx)
+     EX, EY, EVX, EVY = [a.ravel() for a in np.meshgrid(gp, gp, gv, gv, indexing="ij")]
+@@ -822,6 +912,12 @@
+             v0, vx_, vy_ = v[:m], v[m:2 * m] - v[:m], v[2 * m:] - v[:m]
+             u0, ux, uy, v0, vx_, vy_ = [a_.to(f32).to(dev)[:, None] for a_ in (u0, ux, uy, v0, vx_, vy_)]
+             dX = EX_t + EVX_t * dt; dY = EY_t + EVY_t * dt          # (1, G) offsets in cells
++            if bl is not None:
++                bv_, okn_, _ = _bilin(torch, flat[k], u0 + ux * dX + uy * dY, v0 + vx_ * dX + vy_ * dY, H, W, clip)
++                val = torch.where(okn_, (bv_ - float(bl[0][k])) * float(bl[1][k]), torch.zeros_like(bv_))
++                acc.add_(val, alpha=float(w[k]))
++                del bv_, okn_, val, dX, dY
++                continue
+             cu = torch.floor(u0 + ux * dX + uy * dY + 0.5)
+             cv = torch.floor(v0 + vx_ * dX + vy_ * dY + 0.5)
+             ins = (cu >= 0) & (cu <= W - 1) & (cv >= 0) & (cv <= H - 1)

@@ -1,0 +1,162 @@
+--- tmp/fstk_gen127.py	2026-11-07 23:24:59
++++ workspace/submission/stackd/fstk.py	2026-11-07 23:38:23
+@@ -262,8 +262,10 @@
+             ang_ = np.abs(np.arctan2(VX * vcy - VY * vcx, VX * vcx + VY * vcy))
+             ok = (sp_ >= VLO * vcs - dv) & (sp_ <= VHI * vcs + dv) & (ang_ <= ANG + dv / max(vcs, 1e-9))
+             VX, VY = VX[ok], VY[ok]
++            IXo, IYo = IX.ravel()[ok], IY.ravel()[ok]
+             o_ = np.argsort((VX - vcx) ** 2 + (VY - vcy) ** 2)
+             VX, VY = VX[o_], VY[o_]
++            IXo, IYo = IXo[o_], IYo[o_]
+             nprior = len(VX)
+             P = mx
+             Hc, Wc = H2, W2
+@@ -288,18 +290,67 @@
+             OFF = (P + SY) * WD + (P + SX)
+             t_c0 = time.time()
+             nh = 0
+-            for h in range(len(VX)):
+-                if (h & 63) == 0 and time.time() - T0 > deadline:
+-                    break
+-                of_ = OFF[h]
+-                if K == 1:
+-                    acc.copy_(Dq[0, of_[0]:of_[0] + L])
+-                else:
+-                    torch.add(Dq[0, of_[0]:of_[0] + L], Dq[1, of_[1]:of_[1] + L], out=acc)
+-                    for k_ in range(2, K):
+-                        acc.add_(Dq[k_, of_[k_]:of_[k_] + L])
+-                torch.maximum(best, acc, out=best)
+-                nh += 1
++            done_idx = None
++            TREE = os.environ.get("TNO_FSTK_TREE", "1") != "0" and use8 and K >= 3
++            if TREE:
++                # gen 128 (TNO_FSTK_TREE, default 1; 0 = gen127 loop): share partial sums of time-contiguous co-add
++                # subsets between nearby velocities (velocity tiles of TB x TB grid cells).  int8 sums are exact and
++                # cannot overflow (qs bounds the sum of all |max|), so `best` is bit-identical to the flat loop when
++                # all hypotheses finish; per hypothesis the top level costs 1 add + 1 max instead of K-1 adds + 1 max.
++                try:
++                    TB = int(os.environ.get("TNO_FSTK_TREEB", "8") or 8)
++                    kb = (IXo // TB) * 100003 + (IYo // TB)
++                    _, bid = np.unique(kb, return_inverse=True); bid = bid.ravel()
++                    brank = np.full(int(bid.max()) + 1, 1 << 40, np.int64)
++                    np.minimum.at(brank, bid, np.arange(len(VX)))
++                    S_all = [int(x) for x in np.argsort(dts_c, kind="stable")]
++                    SA, SB = _split(S_all, dts_c)
++                    done = np.zeros(len(VX), bool)
++                    npass = 0
++                    for b_ in np.argsort(brank):
++                        if time.time() - T0 > deadline:
++                            break
++                        hs = np.nonzero(bid == b_)[0]
++                        OFFb = OFF[hs]
++                        cnt = [0]
++                        pa, ia = _build(torch, Dq, OFFb, SA, dts_c, L, cnt)
++                        pb, ib = _build(torch, Dq, OFFb, SB, dts_c, L, cnt)
++                        for j_, h in enumerate(hs):
++                            ta, ba = pa[ia[j_]]; tb, bb = pb[ib[j_]]
++                            oa = int(OFFb[j_, SA[0]]) - ba; ob = int(OFFb[j_, SB[0]]) - bb
++                            torch.add(ta[oa:oa + L], tb[ob:ob + L], out=acc)
++                            torch.maximum(best, acc, out=best)
++                        npass += cnt[0] + 2 * len(hs)
++                        done[hs] = True
++                        del pa, pb
++                    ta = tb = None
++                    done_idx = np.nonzero(done)[0]
++                    nh = len(done_idx)
++                    tree_info = f", tree {npass / max(nh, 1):.2f} passes/hyp vs {K}"
++                except Exception as ex:
++                    log("fstk tree failed, flat loop:", repr(ex)[:200])
++                    try:
++                        if dev == "cuda":
++                            torch.cuda.empty_cache()
++                    except Exception:
++                        pass
++                    best.fill_(-127); done_idx = None; nh = 0; tree_info = ", tree failed"
++            else:
++                tree_info = ""
++            if done_idx is None:
++                for h in range(len(VX)):
++                    if (h & 63) == 0 and time.time() - T0 > deadline:
++                        break
++                    of_ = OFF[h]
++                    if K == 1:
++                        acc.copy_(Dq[0, of_[0]:of_[0] + L])
++                    else:
++                        torch.add(Dq[0, of_[0]:of_[0] + L], Dq[1, of_[1]:of_[1] + L], out=acc)
++                        for k_ in range(2, K):
++                            acc.add_(Dq[k_, of_[k_]:of_[k_] + L])
++                    torch.maximum(best, acc, out=best)
++                    nh += 1
++                done_idx = np.arange(nh)
+             if dev == "mps":
+                 torch.mps.synchronize()
+             elif dev == "cuda":
+@@ -327,7 +378,7 @@
+             if len(sc) and nh > 0:
+                 pf_ = (yy * WD + xx).to(torch.int64)
+                 bv_ = torch.full((len(sc),), -1e9, device=dev); bi_ = torch.zeros(len(sc), dtype=torch.int64, device=dev)
+-                OFF_t = torch.tensor(OFF[:nh], dtype=torch.int64, device=dev)
++                OFF_t = torch.tensor(OFF[done_idx], dtype=torch.int64, device=dev)
+                 for h0 in range(0, nh, 256):
+                     v_ = torch.zeros((min(256, nh - h0), len(sc)), device=dev)
+                     for k_ in range(K):
+@@ -335,7 +386,7 @@
+                     m_, a_ = v_.max(0)
+                     bt_ = m_ > bv_
+                     bv_ = torch.where(bt_, m_, bv_); bi_ = torch.where(bt_, a_ + h0, bi_)
+-                hh = bi_.cpu().numpy()
++                hh = done_idx[bi_.cpu().numpy()]
+                 del OFF_t
+             yy, xx, sc = yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()
+             fi = fi0 + len(frames_out)
+@@ -462,7 +513,7 @@
+                 except Exception as ex:
+                     log("fstk probe failed:", repr(ex)[:120])
+             log(f"fstk d={d:.2f}: {nh}/{nprior} hyps in {dtc:.1f}s ({nh / max(dtc, 1e-6):.0f} hyp/s, K {K}, "
+-                f"{'int8 q%.2f' % qs if use8 else 'fp16'}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
++                f"{'int8 q%.2f' % qs if use8 else 'fp16'}{tree_info}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
+                 f"peaks>5/6/7 {nab}, kept {len(sc)}; slice {di + 1}/{len(dg)} at {time.time() - T0:.0f}s of deadline {deadline:.0f}s; mx {mx} (old {mx_old})")
+             sl_t.append((time.time() - t_d0, t_warp, dtc, nh)); done_d.append(d)
+             del Dq, bs, pk
+@@ -486,6 +537,41 @@
+     return rows_out, frames_out
+ 
+ 
++def _split(S, tc):
++    """gen 128: split a time-ordered co-add list in two contiguous parts minimising spreadA^2 + spreadB^2."""
++    bst = None
++    for m in range(1, len(S)):
++        c = (tc[S[m - 1]] - tc[S[0]]) ** 2 + (tc[S[-1]] - tc[S[m]]) ** 2
++        if bst is None or c < bst[0]:
++            bst = (c, m)
++    return S[:bst[1]], S[bst[1]:]
++
++
++def _build(torch, Dq, OFFb, S, tc, L, cnt):
++    """gen 128: partial sums of co-add subset S for the block's hypotheses OFFb (nb, K).  Returns (parts, inv):
++    parts[u] = (tensor, base) with tensor[j - base] = sum_{k in S} Dq[k][j + OFF[h,k] - OFF[h,S0]] for every hypothesis
++    h with inv[h] == u, valid for j in [min_h OFF[h,S0], max_h OFF[h,S0] + L)."""
++    if len(S) == 1:
++        return [(Dq[S[0]], 0)], np.zeros(len(OFFb), np.int64)
++    A, B = _split(S, tc)
++    pa, ia = _build(torch, Dq, OFFb, A, tc, L, cnt)
++    pb, ib = _build(torch, Dq, OFFb, B, tc, L, cnt)
++    o0 = OFFb[:, S[0]]; dl = OFFb[:, B[0]] - o0
++    uq, inv = np.unique(np.stack([ia, ib, dl], 1), axis=0, return_inverse=True)
++    inv = np.asarray(inv).ravel()
++    parts = []
++    for u in range(len(uq)):
++        a_, b_, d_ = (int(x) for x in uq[u])
++        hs = inv == u
++        lo = int(o0[hs].min()); n = int(o0[hs].max()) - lo + L
++        ta, ba = pa[a_]; tb, bb = pb[b_]
++        buf = torch.empty(n, dtype=Dq.dtype, device=Dq.device)
++        torch.add(ta[lo - ba: lo - ba + n], tb[lo + d_ - bb: lo + d_ - bb + n], out=buf)
++        cnt[0] += 1
++        parts.append((buf, lo))
++    return parts, inv
++
++
+ def _rescore(torch, dev, Dm3, xx, yy, vx, vy, dts_c, P, WD, HD, norm, dv, RSUB):
+     """gen 109 (arm H): for each peak (kernel coords xx, yy; velocity vx, vy in px/day), the best stack over a local grid
+     of position offsets (+-0.5 px) and velocity offsets (+-0.5 dv), steps 0.5/RSUB (RSUB 0: the exact point only); the

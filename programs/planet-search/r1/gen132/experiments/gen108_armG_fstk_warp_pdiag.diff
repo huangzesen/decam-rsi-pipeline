@@ -1,0 +1,61 @@
+--- workspace/submission/stackd/fstk.py	2026-11-06 11:11:25
++++ tmp/armG/submission/stackd/fstk.py	2026-11-06 12:41:07
+@@ -31,6 +31,7 @@
+     DSTEP = float(os.environ.get("TNO_FSTK_DSTEP", "1.0"))     # distance step in units of the dgrid_deep step
+     MAXD = int(os.environ.get("TNO_FSTK_MAXD", "0") or 0)       # debug: at most this many distances
+     CHB = float(os.environ.get("TNO_FSTK_CHMB", "384")) * 1e6   # conv output chunk size (bytes)
++    WMODE = os.environ.get("TNO_FSTK_WARP", "nearest")         # gen 108 arm G: d-frame warp interpolation (nearest|bilinear)
+     probes = []
+     try:
+         pf = os.environ.get("TNO_FSTK_PROBE")    # diagnostic only: json list of {state, epoch_mjd, tag}
+@@ -127,7 +128,7 @@
+                     sx = q[..., 0] / q[..., 2]; sy = q[..., 1] / q[..., 2]
+                     ux = (sx - x0) / (2 * PIX) - 0.25; uy = (sy - y0) / (2 * PIX) - 0.25
+                     grid = torch.stack([2 * ux / (W2 - 1) - 1, 2 * uy / (H2 - 1) - 1], -1)[None]
+-                    rows_.append(F.grid_sample(src_[None, None], grid, mode="nearest",
++                    rows_.append(F.grid_sample(src_[None, None], grid, mode=WMODE,
+                                                padding_mode="zeros", align_corners=True)[0, 0].half())
+                     del Wd, X, q, sx, sy, ux, uy, grid
+                 fr_ = torch.cat(rows_, 0)
+@@ -265,6 +266,41 @@
+                                         sxx = int(round(vx_ * dts_c[k_])); syy = int(round(vy_ * dts_c[k_]))
+                                         a_ += float(Dq[k_, (P + syy + yi + ey) * WD + P + sxx + xi + ex])
+                                     bestv = max(bestv, a_ * qn)
++                    # gen 108 (arm G) diagnostic: per-frame map values at the truth position (TNO_FSTK_PDIAG=1)
++                    if os.environ.get("TNO_FSTK_PDIAG", "0") == "1":
++                        try:
++                            ws_ = []; vr_ = []; v3_ = []; z7_ = []; vs_ = []; vsc_ = []; vsm_ = []
++                            for k_, n in enumerate(sel):
++                                lt_ = 0.0
++                                for _ in range(2):
++                                    xp_ = orbit.propagate(s_[:3], s_[3:], np.array([t[n] - lt_ - pr["epoch_mjd"]]))[0]
++                                    lt_ = np.linalg.norm(xp_ - obs[n]) / C_AU
++                                u_ = xp_ - obs[n]; u_ = u_ / np.linalg.norm(u_)
++                                qq_ = TF0 @ u_
++                                fx_ = (qq_[0] / qq_[2] - x0) / PIX; fy_ = (qq_[1] / qq_[2] - y0) / PIX
++                                ix_, iy_ = int(round(fx_)), int(round(fy_))
++                                H1_, W1_ = maps.shape[1:]
++                                if not (2 <= ix_ < W1_ - 2 and 2 <= iy_ < H1_ - 2):
++                                    continue
++                                r_ = maps[k_, iy_ - 1:iy_ + 2, ix_ - 1:ix_ + 2].float()
++                                vr_.append(float(r_[1, 1])); v3_.append(float(r_.max()))
++                                z7_.append(int((maps[k_, iy_ - 3:iy_ + 4, ix_ - 3:ix_ + 4] == 0).sum()))
++                                jx_ = int(round(fx_ / 2 - 0.25)); jy_ = int(round(fy_ / 2 - 0.25))
++                                s2_ = float(smaps[k_, jy_, jx_]); vsc_.append(s2_)
++                                sv_ = smaps[k_, ::3, ::3].float(); sv_ = sv_[sv_ != 0]
++                                vs_.append(s2_ - (float(torch.median(sv_)) if sv_.numel() > 100 else 0.0))
++                                vsm_.append(float(F.max_pool2d(maps[k_:k_ + 1].float()[None, :, 2 * jy_:2 * jy_ + 2, 2 * jx_:2 * jx_ + 2], 2, 2)))
++                                ws_.append(float(wsel[k_]) if DW else 1.0)
++                            ws_ = np.array(ws_); nw_ = math.sqrt(max((ws_ ** 2).sum(), 1e-9))
++                            def st_(v):
++                                return float((np.array(v) * ws_).sum() / nw_)
++                            log(f"fstk pdiag {pr.get('tag', '?')}: nfr {len(ws_)}, inj snr {pr.get('snr', 0):.2f} "
++                                f"(/1.43 x sqrt n = {pr.get('snr', 0) / 1.43 * math.sqrt(max(len(ws_), 1)):.2f}); "
++                                f"stack raw1\" {st_(vr_):.2f}, raw 3x3max {st_(v3_):.2f}, 2\" maxpool {st_(vsm_):.2f}, "
++                                f"2\" maxpool+clip (smaps) {st_(vsc_):.2f}, smaps-median {st_(vs_):.2f}; fstk hyp {bestv:.2f}; per-frame raw "
++                                + " ".join(f"{x:.1f}" for x in vr_) + " | smaps " + " ".join(f"{x:.1f}" for x in vsc_) + " | zeros7x7 " + " ".join(str(x) for x in z7_))
++                        except Exception as ex:
++                            log("fstk pdiag failed:", repr(ex)[:160])
+                     bl = float(bs[yi - 2:yi + 3, xi - 2:xi + 3].max())
+                     rk = int((sc > bl).sum()) if len(sc) else 0
+                     inprior = (VLO * vcs <= math.hypot(pvx, pvy) <= VHI * vcs) and \

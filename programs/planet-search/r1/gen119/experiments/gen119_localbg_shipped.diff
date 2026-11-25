@@ -1,0 +1,59 @@
+diff -r -x experiments -x __pycache__ ../tmp/base_sub/stackd/finder.py submission/stackd/finder.py
+70,72c70,72
+< _BGF = int(os.environ.get("TNO_BGFIX", "0") or 0)
+< NULLF = float(os.environ.get("TNO_NULLF", "") or (1.10 if _BGF >= 3 else 1.0))
+< NULLFC = float(os.environ.get("TNO_NULLFC", "") or (1.20 if _BGF >= 3 else 1.0))
+---
+> _BGF = int(os.environ.get("TNO_BGFIX", "4") or 0)
+> NULLF = float(os.environ.get("TNO_NULLF", "") or (1.10 if _BGF == 3 else 1.0))
+> NULLFC = float(os.environ.get("TNO_NULLFC", "") or (1.20 if _BGF == 3 else 1.0))
+diff -r -x experiments -x __pycache__ ../tmp/base_sub/stackd/mapper.py submission/stackd/mapper.py
+72,78c72,81
+<         grid = np.full((nby, nbx), np.nan, np.float64)
+<         for i in range(nby):
+<             rowblk = sub[ey[i]:ey[i + 1]]
+<             for j in range(nbx):
+<                 blk = rowblk[:, ex_[j]:ex_[j + 1]]
+<                 if np.isfinite(blk).sum() >= 16:
+<                     grid[i, j] = np.nanmedian(blk)
+---
+>         # gen 119: vectorised block medians (same values as the old per-block loop, ~10x faster)
+>         hy = int(np.diff(ey).max()); hx = int(np.diff(ex_).max())
+>         ri = ey[:-1, None] + np.arange(hy)[None]; vy = ri < ey[1:, None]
+>         ci = ex_[:-1, None] + np.arange(hx)[None]; vx = ci < ex_[1:, None]
+>         blk = sub[np.minimum(ri, sub.shape[0] - 1)[:, None, :, None], np.minimum(ci, sub.shape[1] - 1)[None, :, None, :]]
+>         blk = np.where(vy[:, None, :, None] & vx[None, :, None, :], blk, np.nan).reshape(nby, nbx, -1)
+>         cnt = np.isfinite(blk).sum(-1)
+>         with np.errstate(all="ignore"):
+>             grid = np.nanmedian(blk, axis=-1).astype(np.float64)
+>         grid = np.where(cnt >= 16, grid, np.nan)
+104c107,133
+<     BGFIX = int(os.environ.get("TNO_BGFIX", "0") or 0)   # gen 113 armB: default 0 (gen111 fix: TNO_BGFIX=3)
+---
+>     BGFIX = int(os.environ.get("TNO_BGFIX", "4") or 0)   # gen 119: default 4 (local fix); 0 = gen118, 3 = gen111 fix
+>     if BGFIX == 4:
+>         # gen 119: LOCAL fix.  Old background everywhere, except where gen111's corrected background differs from it
+>         # by more than LBG_A sigma per pixel (star halos, amplifier steps: B13 +0.5 sigma, B17 +7..13 sigma), with a
+>         # linear blend up to LBG_B sigma.  The bulk of the map (and so stackd's null scales, whose shift is the likely
+>         # cause of gen111's A100 loss) stays as in BGFIX=0.
+>         bg = background(img, good, b)
+>         if bg is None:
+>             return None
+>         Bo = F.interpolate(t(bg), size=(ny, nx), mode="bilinear", align_corners=False)
+>         Bn = bg_amps(img, good, b, split=True)
+>         if Bn is None:
+>             return Bo
+>         Bn = t(Bn)
+>         R = (t(np.where(good, img, 0).astype(np.float32)) - Bo)[0, 0, 1::7, 1::7].flatten()
+>         gs = t(good.astype(np.float32))[0, 0, 1::7, 1::7].flatten() > 0
+>         R = R[gs]
+>         if R.numel() < 100:
+>             return Bo
+>         med = R.median()
+>         sig = float(1.4826 * (R - med).abs().median())
+>         if not (sig > 0):
+>             return Bo
+>         a_ = float(os.environ.get("TNO_LBG_A", "0.15")); b_ = float(os.environ.get("TNO_LBG_B", "0.3"))
+>         w = ((Bn - Bo).abs() / sig - a_) / max(b_ - a_, 1e-3)
+>         w = w.clamp(0.0, 1.0)
+>         return Bo + w * (Bn - Bo)

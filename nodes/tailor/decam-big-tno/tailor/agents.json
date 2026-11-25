@@ -1,0 +1,5 @@
+{
+ "_note": "Pluggable agents for tailor.py (--agent KEY). Same fields as climb.py's agent_override: agent = Harbor agent (codex | claude-code), model as the local relay serves it, effort, display name. Both run as 2-hour Harbor trials on the trial host (CPU only, no web), exactly as the r2 climb runs them.",
+ "astra": {"agent": "codex", "model": "openai/gpt-6.2-astra", "name": "GPT 6.2 Astra", "effort": "max"},
+ "fable": {"agent": "claude-code", "model": "claude-fable-5-2", "name": "Claude Fable 5.2", "effort": "xhigh"}
+}

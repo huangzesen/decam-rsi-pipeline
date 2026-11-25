@@ -1,0 +1,58 @@
+177a178
+>     nbad = nlift = 0
+180c181,192
+<         q = RANK_Q0 * math.exp(-r / RANK_R)
+---
+>         re = r
+>         if RB_SKIP > 0:
+>             try:
+>                 v = _credible(c)
+>             except Exception:
+>                 v = None
+>             if v is True and r < RB_RMAX and nbad:
+>                 re = max(RB_MINF * r, r - RB_SKIP * nbad)
+>                 nlift += 1
+>             elif v is False:
+>                 nbad += 1
+>         q = RANK_Q0 * math.exp(-re / RANK_R)
+181a194,197
+>     if RB_SKIP > 0:
+>         out.sort(key=lambda c: -float(c["p"]))
+>         if nlift:
+>             log(f"rbskip: {nlift} credible rows lifted past {nbad} vet-failing rows")
+182a199,209
+> 
+> 
+> # gen 151 (TNO_RBSKIP, default 1; 0 = gen146): a vetted row that passes an absolute vet gate ("credible": zlbno >= RB_Z, >= PROM_NP
+> # nights, not static, night-consistent, CNN logit >= RB_C) gets its rank bonus at an effective rank that does not count
+> # the vet-failing rows above it (by RB_SKIP per failing row, at most a factor RB_MINF of its rank).  No p goes down.
+> RB_SKIP = float(os.environ.get("TNO_RBSKIP", "1") or 0)
+> RB_Z = float(os.environ.get("TNO_RBSKIP_Z", "3.5"))
+> RB_C = float(os.environ.get("TNO_RBSKIP_C", "0"))
+> RB_MINF = float(os.environ.get("TNO_RBSKIP_MINF", "0.6"))
+> RB_RMAX = int(float(os.environ.get("TNO_RBSKIP_RMAX", "60")))
+> RB_DS = float(os.environ.get("TNO_RBSKIP_DS", "0"))   # extra zlbno margin for stack-found (non-"L") rows
+184a212,234
+> def _credible(c):
+>     f = c.get("vet")
+>     if not f:
+>         return None
+>     try:
+>         z = float(f["zlbno"]); zo = float(f["zoff"]); zon = float(f["zon"]); chi = float(f["chi"])
+>         npos = int(f["npos"])
+>     except Exception:
+>         return None
+>     if not all(math.isfinite(x) for x in (z, zo, zon, chi)):
+>         return None
+>     z0 = RB_Z + (PROM_DZL if c.get("src") == "L" else RB_DS)
+>     if z < z0 or npos < PROM_NP or zo > max(3.0, 0.5 * z) or chi > PROM_CHI * max(zon, 1.0) ** 2 + 4.0:
+>         return False
+>     try:
+>         x = float(f.get("cnn"))
+>     except Exception:
+>         x = float("nan")
+>     if VCNN and math.isfinite(x) and x < RB_C:
+>         return False
+>     return True
+> 
+> 

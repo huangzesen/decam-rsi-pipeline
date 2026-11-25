@@ -1,0 +1,112 @@
+--- $RSI_SANDBOX/r1/gen136/workspace/history/gen135/submission/stackd/fstk.py	2026-11-08 09:47:15
++++ stackd/fstk.py	2026-11-08 10:37:00
+@@ -27,11 +27,19 @@
+     return math.log(42.0 / d) if d <= 42.0 else K_ * math.log(d / 42.0)
+ 
+ def fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0, pole, GM, tframe, T0,
+-                deadline, log, fi0, C_AU=173.1446, orbit=None):
++                deadline, log, fi0, C_AU=173.1446, orbit=None, prior=None, excl=None):
+     rows_out, frames_out = [], []
+     DMIN = float(os.environ.get("TNO_FSTK_DMIN", "30")); DMAX = float(os.environ.get("TNO_FSTK_DMAX", "70"))
+     VLO = float(os.environ.get("TNO_FSTK_VLO", "0.85")); VHI = float(os.environ.get("TNO_FSTK_VHI", "1.12"))
+     ANG = math.radians(float(os.environ.get("TNO_FSTK_ANG", "25")))
++    # gen 136 (extension passes, see stackd/finder.py TNO_FSTK_EXT): prior = (VLO, VHI, ANG deg) replaces the core prior;
++    # excl = (VLO, VHI, ANG deg) of the previous pass, whose velocity cells (same tolerance formula) are skipped, so an
++    # extension pass searches exactly the hypotheses no earlier pass searched.
++    if prior is not None:
++        VLO, VHI, ANG = float(prior[0]), float(prior[1]), math.radians(float(prior[2]))
++    XLO = XHI = XANG = None
++    if excl is not None:
++        XLO, XHI, XANG = float(excl[0]), float(excl[1]), math.radians(float(excl[2]))
+     # gen 126 (TNO_FSTK_TIGHT, default 1; 0 = gen125): canvas margin = shift reach only (see the mx line)
+     TIGHT = os.environ.get("TNO_FSTK_TIGHT", "1") != "0"
+     GSPAN = float(os.environ.get("TNO_FSTK_GSPAN", "0.08"))
+@@ -299,6 +307,12 @@
+             sp_ = np.hypot(VX, VY)
+             ang_ = np.abs(np.arctan2(VX * vcy - VY * vcx, VX * vcx + VY * vcy))
+             ok = (sp_ >= VLO * vcs - dv) & (sp_ <= VHI * vcs + dv) & (ang_ <= ANG + dv / max(vcs, 1e-9))
++            if XLO is not None:
++                ok &= ~((sp_ >= XLO * vcs - dv) & (sp_ <= XHI * vcs + dv) & (ang_ <= XANG + dv / max(vcs, 1e-9)))
++            if not ok.any():
++                log(f"fstk d={d:.2f}: no hypotheses in this prior ring")
++                Dm = None; Dm3 = None
++                continue
+             VX, VY = VX[ok], VY[ok]
+             IXo, IYo = IX.ravel()[ok], IY.ravel()[ok]
+             o_ = np.argsort((VX - vcx) ** 2 + (VY - vcy) ** 2)
+--- $RSI_SANDBOX/r1/gen136/workspace/history/gen135/submission/stackd/finder.py	2026-11-08 09:47:15
++++ stackd/finder.py	2026-11-08 11:40:09
+@@ -630,6 +630,7 @@
+     # gen 104 (arm B): fast full-span shift-and-stack (stackd/fstk.py), TNO_FSTK=1.  Its peaks join best_all as a window of
+     # their own (wi FSTK_WI), kind 3 (outside the p null).  TNO_FSTK_ONLY=1 (debug) skips the window search.
+     FSTK_WI = 10 ** 6
++    FSTX_WI = 10 ** 6 + 1     # gen 136: fstk extension-pass rows
+     FST_ROWS = []
+     fst_only = False
+     if os.environ.get("TNO_FSTK", "1") == "1":
+@@ -648,7 +649,35 @@
+                     nhyp = max(nhyp, 1)
+         except Exception as ex:
+             log("fstk failed:", repr(ex)[:300])
++        # gen 136 (TNO_FSTK_EXT, "" / "0" = gen135): extension passes.  The core fstk prior (|v| 0.85-1.12 v_circ, within
++        # 25 deg of prograde-ecliptic circular) misses high-inclination bodies (the sky-motion angle to the ecliptic
++        # direction is ~i near the nodes; ~1/4 of hot classicals have i > 25 deg) and eccentric ones (v_t / v_circ =
++        # sqrt(1 + e cos f): 0.84-1.14 at e 0.3, 0.71-1.22 at e 0.5).  The A100 is estimated to finish the core sweep
++        # well inside its fstk slot (gen135's slice re-ordering scored identically), so the rest of the slot searches
++        # rings of the velocity plane that no earlier pass searched, each ring a full distance sweep, in order.  Each
++        # ring is "VLO:VHI:ANGdeg" and must contain the previous one.  When the core sweep uses the whole slot (Mac),
++        # nothing changes.  Rows are a window of their own (FSTX_WI, kind 3, seed slots at 1/TNO_FSTX_SLOW the rate).
+         try:
++            ext_ = [tuple(float(v) for v in x.split(":")) for x in
++                    os.environ.get("TNO_FSTK_EXT", "0.85:1.12:40,0.72:1.28:40").split(",") if x.strip() and x.strip() != "0"]
++            prev_ = (float(os.environ.get("TNO_FSTK_VLO", "0.85")), float(os.environ.get("TNO_FSTK_VHI", "1.12")),
++                     float(os.environ.get("TNO_FSTK_ANG", "25")))
++            for pr_ in ext_:
++                left_ = dl_ - (time.time() - T0)
++                if left_ < 8:
++                    log(f"fstk ext {pr_}: skipped, {left_:.0f}s left in the fstk slot")
++                    break
++                log(f"fstk ext pass {pr_} minus {prev_}: {left_:.0f}s left in the fstk slot")
++                xr_, xf_ = fstk_.fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0,
++                                             pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit,
++                                             prior=pr_, excl=prev_)
++                if xf_:
++                    best_all.extend(xr_); FST_ROWS.extend(xr_)
++                    frames.extend(xf_); wi_of.extend([FSTX_WI] * len(xf_))
++                prev_ = pr_
++        except Exception as ex:
++            log("fstk ext failed:", repr(ex)[:300])
++        try:
+             if dev == "cuda":
+                 torch.cuda.empty_cache()
+         except Exception:
+@@ -1135,8 +1164,18 @@
+             slow_ = float(os.environ.get("TNO_FSTK_SLOW", "1.0") or 1.0)
+         for r_, j in enumerate(ii):
+             rk[j] = r_ * slow_
+-    oo_all = sorted(range(len(best_all)), key=lambda j: (rk[j], -best_all[j][0]))
+-    oo = oo_all[:NSEED]
++    # gen 136: fstk extension rows (FSTX_WI) do not share the NSEED cap: the other windows' seeds (and best_extra) are
++    # exactly gen135's, and the best TNO_FSTX_NF x NSEED extension rows by score are appended after them.  (Sharing the
++    # cap cost in-prior injected bodies on the Mac: LO2 14 -> 11 in the top 25.)
++    xs_ = sorted([j for j in range(len(best_all)) if wof[j] == FSTX_WI], key=lambda j: -best_all[j][0])
++    try:
++        NXS = int(float(os.environ.get("TNO_FSTX_NF", "0.25") or 0) * NSEED)
++    except Exception:
++        NXS = 0
++    oo_all = sorted([j for j in range(len(best_all)) if wof[j] != FSTX_WI], key=lambda j: (rk[j], -best_all[j][0]))
++    oo = oo_all[:NSEED] + xs_[:NXS]
++    if xs_:
++        log(f"fstk ext seeds: {min(len(xs_), NXS)} of {len(xs_)} rows appended after the {min(NSEED, len(oo_all))} regular seeds")
+     # gen 102: window/deep peaks past the NSEED cut are kept (up to TNO_XTRA x NSEED more, same round-robin order) and
+     # refined after every regular seed if time remains before ref_deadline (the Mac run finished ~95 s early with all
+     # seed caps full).  They are kind 3, so they stay outside the window-seed p null.  TNO_XTRA=0 = gen101.
+@@ -1150,7 +1189,7 @@
+     # gen 36: deep-window seeds are kind 3, kept OUT of the p null (TNO_DNULL=0: gen035 behaviour, they count as 2).
+     # The deep window's prior-restricted, differently scored peaks refine to a noise population of their own; mixed
+     # into the null they made p depend on what the deep window does (measured: null MAD 0.98 -> 1.36 with LMO).
+-    sdeep = np.array([(wi_of[r[6]] in deep_ids or wi_of[r[6]] == FSTK_WI) for r in best_all], bool) if os.environ.get("TNO_DNULL", "1") != "0" \
++    sdeep = np.array([(wi_of[r[6]] in deep_ids or wi_of[r[6]] in (FSTK_WI, FSTX_WI)) for r in best_all], bool) if os.environ.get("TNO_DNULL", "1") != "0" \
+         else np.zeros(len(best_all), bool)
+ 
+     # ---------------------------------------------------------------- 4. states, refinement on all exposures

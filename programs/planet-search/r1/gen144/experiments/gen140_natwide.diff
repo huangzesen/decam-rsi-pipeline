@@ -1,0 +1,84 @@
+--- tmp/arm_base/stackd/fstk.py	2026-11-08 16:11:22
++++ workspace/submission/stackd/fstk.py	2026-11-08 17:44:28
+@@ -68,6 +68,16 @@
+     NAT = RS and os.environ.get("TNO_FSTK_NAT", "1") != "0"
+     NATN = int(float(os.environ.get("TNO_FSTK_NATN", "2000") or 0))
+     NCLIP = float(os.environ.get("TNO_FSTK_NCLIP", "3.0") or 3.0)
++    # gen 140 (TNO_FSTK_NATW, default 1; 0 = gen139): widen the native pool.  A cheap native pre-pass (+-0.5 cell x +-1 dv in
++    # 0.5 steps = 225 combos, ~9x cheaper per peak than the 2025-combo first grid) scores a much larger pool: the best NATWN
++    # clip-3 peaks UNION the best NATWC peaks by the coarse (pooled-canvas) score, which the clip-3 cut may have dropped.  The
++    # gen139 native pool (best NATN by clip-3) is always kept; the best NATWX pre-pass peaks not in it are added, then the
++    # full gen139 native score + blend runs on the union.  Defaults scale with the device (much larger on cuda) and with 24/N.
++    NATW = NAT and os.environ.get("TNO_FSTK_NATW", "1") != "0"
++    _cu = (dev == "cuda")
++    NATWN = int(float(os.environ.get("TNO_FSTK_NATWN", "15000" if _cu else "8000") or 0))
++    NATWC = int(float(os.environ.get("TNO_FSTK_NATWC", "15000" if _cu else "4000") or 0))
++    NATWX = int(float(os.environ.get("TNO_FSTK_NATWX", "3000" if _cu else "1500") or 0))
+     probes = []
+     PROBE_OLD = os.environ.get("TNO_FSTK_PROBE_OLD", "0") == "1"   # gen 127: 1 = gen126's (wrong at d != r) probe position
+     try:
+@@ -490,6 +500,17 @@
+                         if len(on_):
+                             if nat_mu[0] is None:
+                                 nat_mu[0] = _nat_med(torch, maps, NCLIP)
++                            if NATW:
++                                try:
++                                    t_w0 = time.time()
++                                    on_ = _natwide(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
++                                                   xx, yy, ex_, ey_, evx_, evy_, VX, VY, hh, s2_, on_, N, dv, NCLIP, nat_mu[0],
++                                                   NATWN, NATWC, NATWX, log, d, sc_co=sc)
++                                    log(f"fstk natwide d={d:.2f} ({time.time() - t_w0:.1f}s): native pool {len(on_)}")
++                                except Exception as exw:
++                                    log("fstk natwide failed:", repr(exw)[:200])
++                                    on_ = np.argsort(-s2_)[:max(natn_, NPK)]
++                                    on_ = on_[s2_[on_] > -1e8]
+                             fs_, fex_, fey_, fevx_, fevy_ = _natscore(
+                                 torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
+                                 xx[on_] + ex_[on_], yy[on_] + ey_[on_], VX[hh[on_]] + evx_[on_], VY[hh[on_]] + evy_[on_],
+@@ -814,3 +835,46 @@
+         best[sl] = mx_.cpu().numpy(); arg[sl] = am_.cpu().numpy()
+         del acc
+     return best, EX[arg], EY[arg], EVX[arg], EVY[arg]
++
++
++def _natwide(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, ex_, ey_, evx_, evy_,
++             VX, VY, hh, s2_, on_, N, dv, clip, mu, NATWN, NATWC, NATWX, log, dd, sc_co=None):
++    """gen 140 (TNO_FSTK_NATW): returns the widened native pool (indices into the slice's coarse peak list).  on_ = gen139's
++    pool (kept, first).  Pre-pass pool: best NATWN by clip-3 score s2_ UNION best NATWC by coarse rank (the coarse peak list
++    is topk-sorted, so index = coarse rank), minus on_; each scored on the 1" maps over a cheap grid (position +-0.5 cell,
++    velocity +-1 dv, 0.5 steps); the best NATWX of them are appended to on_."""
++    sh = 24.0 / max(N, 24)
++    nw = int(NATWN * sh); nc = int(NATWC * sh); nx = int(NATWX * sh)
++    n = len(s2_)
++    if nx <= 0 or (nw <= 0 and nc <= 0) or n <= len(on_):
++        return on_
++    okk = s2_ > -1e8
++    cand = np.zeros(n, bool)
++    if nw > 0:
++        cand[np.argsort(-s2_)[:nw]] = True
++    if nc > 0:
++        # coarse-score order (the coarse list is topk-sorted only when it was longer than NPK_; else raster order)
++        if sc_co is not None and len(sc_co) == n:
++            cand[np.argsort(-np.asarray(sc_co))[:nc]] = True
++        else:
++            cand[:min(nc, n)] = True
++    cand &= okk
++    cand[on_] = False
++    ci = np.nonzero(cand)[0]
++    if len(ci) == 0:
++        return on_
++    gp = np.array([-0.5, 0.0, 0.5]); gv = np.array([-1.0, -0.5, 0.0, 0.5, 1.0]) * dv
++    b, _, _, _, _ = _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
++                             xx[ci] + ex_[ci], yy[ci] + ey_[ci], VX[hh[ci]] + evx_[ci], VY[hh[ci]] + evy_[ci], clip, mu, gp, gv)
++    b = np.where(np.isfinite(b) & (b < 1e3), b, -1e9)
++    o = np.argsort(-b)[:nx]
++    o = o[b[o] > -1e8]
++    add = ci[o]
++    try:
++        # diagnostic: how many added peaks came from beyond the clip-3 pool cut / from the coarse-only part
++        rk = np.empty(n, np.int64); rk[np.argsort(-s2_)] = np.arange(n)
++        log(f"fstk natwide d={dd:.2f}: pre-pass {len(ci)} peaks, added {len(add)}, of which clip3-rank>{nw} (coarse-only) "
++            f"{int((rk[add] >= nw).sum())}, pre max {b.max():.2f}, add min {b[o].min() if len(o) else 0:.2f}")
++    except Exception:
++        pass
++    return np.concatenate([np.asarray(on_, np.int64), add.astype(np.int64)])

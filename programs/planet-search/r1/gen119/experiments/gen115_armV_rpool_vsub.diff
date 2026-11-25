@@ -1,0 +1,88 @@
+diff -ru -x __pycache__ $RSI_SANDBOX/r1/gen115/workspace/submission/stackd/fstk.py $RSI_SANDBOX/r1/gen115/tmp/armV/submission/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen115/workspace/submission/stackd/fstk.py	2026-11-06 23:48:46
++++ $RSI_SANDBOX/r1/gen115/tmp/armV/submission/stackd/fstk.py	2026-11-07 02:07:51
+@@ -36,10 +36,22 @@
+     # TNO_FSTK_RS=0 reproduces gen108 exactly.  RPOOL = pool size factor (peaks rescored = RPOOL x NPK, best NPK kept).
+     RS = os.environ.get("TNO_FSTK_RS", "1") == "1"
+     RCLIP = float(os.environ.get("TNO_FSTK_RCLIP", "3.0"))
+-    RPOOL = float(os.environ.get("TNO_FSTK_RPOOL", "1.0") or 1.0)
++    RPOOL = float(os.environ.get("TNO_FSTK_RPOOL", "50") or 1.0)   # gen 115 (arm V): 1 -> 50 (pool 15000 peaks re-scored, best NPK kept)
+     RSUB = int(os.environ.get("TNO_FSTK_RSUB", "2") or 2)       # sub-steps per half unit: grid -0.5..0.5 step 0.5/RSUB
+     if RS and DCLIP <= 0:
+         RS = False
++    # gen 115 (arm V): finer coarse velocity grid.  VSUB = sub-steps per dv (grid step dv/VSUB); VQX=1 keeps only the
++    # quincunx (i+j even) half of that grid (covering radius dv/VSUB instead of 0.71 dv/VSUB at 2x fewer hypotheses).
++    # TNO_FSTK_VSUB=1 (VQX ignored) reproduces gen114 exactly.
++    VSUB = float(os.environ.get("TNO_FSTK_VSUB", "1") or 1)
++    VQX = os.environ.get("TNO_FSTK_VQX", "0") == "1"
++    # gen 115 (arm V): PKW = peak local-max window (shipped 9); NMSR/NMSV = greedy suppression of kept re-scored rows
++    # within NMSR px and NMSV dv of a better kept row (0 = off).  TNO_FSTK_RPOOL=1 TNO_FSTK_PKW=9 TNO_FSTK_NMSR=0 = gen114.
++    PKW = int(os.environ.get("TNO_FSTK_PKW", "9") or 9) | 1
++    NMSR = float(os.environ.get("TNO_FSTK_NMSR", "0") or 0)
++    NMSV = float(os.environ.get("TNO_FSTK_NMSV", "1.5") or 1.5)
++    if VSUB <= 1.0:
++        VSUB = 1.0; VQX = False
+     probes = []
+     try:
+         pf = os.environ.get("TNO_FSTK_PROBE")    # diagnostic only: json list of {state, epoch_mjd, tag}
+@@ -172,13 +184,16 @@
+             vc = np.cross(pole, w0); vc = vc / np.linalg.norm(vc) * math.sqrt(GM / d)
+             vcx, vcy = (TD[0] @ vc) / d / SP, (TD[1] @ vc) / d / SP
+             vcs = math.hypot(vcx, vcy)
+-            nv = int(VHI * vcs / dv) + 2
++            dvs = dv / VSUB
++            nv = int(VHI * vcs / dvs) + 2
+             ii = np.arange(-nv, nv + 1)
+             IX, IY = np.meshgrid(ii, ii)
+-            VX, VY = (IX * dv).ravel(), (IY * dv).ravel()
++            VX, VY = (IX * dvs).ravel(), (IY * dvs).ravel()
+             sp_ = np.hypot(VX, VY)
+             ang_ = np.abs(np.arctan2(VX * vcy - VY * vcx, VX * vcx + VY * vcy))
+-            ok = (sp_ >= VLO * vcs - dv) & (sp_ <= VHI * vcs + dv) & (ang_ <= ANG + dv / max(vcs, 1e-9))
++            ok = (sp_ >= VLO * vcs - dvs) & (sp_ <= VHI * vcs + dvs) & (ang_ <= ANG + dvs / max(vcs, 1e-9))
++            if VQX:
++                ok &= ((IX + IY).ravel() % 2) == 0
+             VX, VY = VX[ok], VY[ok]
+             o_ = np.argsort((VX - vcx) ** 2 + (VY - vcy) ** 2)
+             VX, VY = VX[o_], VY[o_]
+@@ -228,7 +243,7 @@
+             # peaks
+             bs = best.reshape(Hc, WD)[:, :Wc].float() * qn
+             del best
+-            pk = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > PTH)
++            pk = (bs == F.max_pool2d(bs[None, None], PKW, 1, PKW // 2)[0, 0]) & (bs > PTH)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
+             nab = [int((sc > z_).sum()) for z_ in (5.0, 6.0, 7.0)]
+@@ -264,7 +279,21 @@
+                     log("fstk rescore failed:", repr(ex)[:200]); rres = None
+             if rres is not None:
+                 s2_, ex_, ey_, evx_, evy_, s0_ = rres
+-                o2_ = np.argsort(-s2_)[:NPK]
++                o2_ = np.argsort(-s2_)
++                if NMSR > 0:
++                    gx_ = xx + ex_; gy_ = yy + ey_; gvx_ = (VX[hh] + evx_) / dv; gvy_ = (VY[hh] + evy_) / dv
++                    kp_ = []
++                    for j in o2_:
++                        if kp_:
++                            ka_ = np.asarray(kp_)
++                            if np.any((np.abs(gx_[ka_] - gx_[j]) <= NMSR) & (np.abs(gy_[ka_] - gy_[j]) <= NMSR) &
++                                      (np.abs(gvx_[ka_] - gvx_[j]) <= NMSV) & (np.abs(gvy_[ka_] - gvy_[j]) <= NMSV)):
++                                continue
++                        kp_.append(int(j))
++                        if len(kp_) >= NPK:
++                            break
++                    o2_ = np.asarray(kp_, np.int64)
++                o2_ = o2_[:NPK]
+                 log(f"fstk rescore d={d:.2f} ({time.time() - t_rs0:.1f}s): {len(sc)} peaks, clip{RCLIP} exact max {s0_.max():.2f}, local max {s2_.max():.2f}, "
+                     f"median lift {np.median(s2_ - s0_):.2f}, kept {len(o2_)}, "
+                     f"overlap with old top {len(set(o2_.tolist()) & set(range(min(NPK, len(sc)))))}")
+@@ -308,7 +337,7 @@
+                     bestv = -1e9; bh_ = None
+                     for ddx in (-1, 0, 1):
+                         for ddy in (-1, 0, 1):
+-                            vx_ = (round(pvx / dv) + ddx) * dv; vy_ = (round(pvy / dv) + ddy) * dv
++                            vx_ = (round(pvx / dvs) + ddx) * dvs; vy_ = (round(pvy / dvs) + ddy) * dvs
+                             for ey in (-1, 0, 1):
+                                 for ex in (-1, 0, 1):
+                                     a_ = 0.0

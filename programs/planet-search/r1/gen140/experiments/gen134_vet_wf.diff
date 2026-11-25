@@ -1,0 +1,155 @@
+--- history/gen133/submission/vet.py	2026-11-08 06:53:07
++++ submission/vet.py	2026-11-08 08:22:44
+@@ -204,7 +204,7 @@
+                     if not np.isfinite(s):
+                         continue
+                     s = max(min(s, 50.0), -50.0)
+-                    out.append((int(ci[q]), int(pj[q]), s))
++                    out.append((int(ci[q]), int(pj[q]), s, math.sqrt(den)))
+             except Exception:
+                 continue
+         for hh in (hi, hw, hm, bi, bw, bm):
+@@ -215,6 +215,63 @@
+     return out, complete
+ 
+ 
++TNO_COL = {"g": 0.55, "r": 1.0, "i": 1.25, "z": 1.4, "Y": 1.4, "VR": 0.85}   # = stackd gen124 colour factors
++
++
++def _gain(rs):
++    """ADU per unit physical flux of a red TNO, per exposure: 10^(0.4 (zp - 30)) x colour; no zp -> exptime x the
++    median ADU-per-second of the exposures that have one (x 0.7: empty-zp exposures are often bad)."""
++    def fnum(x):
++        try:
++            v = float(x)
++            return v if math.isfinite(v) else None
++        except Exception:
++            return None
++    g = np.full(len(rs), np.nan)
++    et = np.array([max(fnum(r.get("exptime")) or 1.0, 1.0) for r in rs])
++    for i, r in enumerate(rs):
++        zp = fnum(r.get("magzero"))
++        if zp is not None and 15 < zp < 40:
++            g[i] = 10 ** (0.4 * (zp - 30.0))
++    ok = np.isfinite(g)
++    rate = float(np.median(g[ok] / et[ok])) if ok.any() else 1.0
++    g[~ok] = 0.7 * rate * et[~ok]
++    col = np.array([TNO_COL.get((r.get("band") or "").strip(), TNO_COL.get((r.get("band") or "").strip()[:1], 1.0))
++                    for r in rs])
++    return (g * col).astype(np.float32)
++
++
++def _wfeat(o, w, ne, NN):
++    """Matched-filter (expected-S/N weighted) versions of zon / zlbno / zn / chi.  Weights are normalised to the
++    candidate's median and clipped to [0.2, 3] (robust to a bad zero point).  Under the null each is N(0, 1)."""
++    ok = np.isfinite(o) & np.isfinite(w) & (w > 0)
++    if ok.sum() < 2:
++        return {}
++    w = np.where(ok, w, 0.0)
++    w = np.clip(w / np.median(w[ok]), 0.2, 3.0) * ok
++    oo = np.where(ok, o, 0.0)
++    wzon = float(np.sum(w * oo) / math.sqrt(np.sum(w * w)))
++    zn = np.full(NN, np.nan); wn = np.zeros(NN)
++    for j in range(NN):
++        m = ok & (ne == j)
++        if m.any():
++            zn[j] = np.sum(w[m] * oo[m]) / math.sqrt(np.sum(w[m] ** 2)); wn[j] = math.sqrt(np.sum(w[m] ** 2))
++    fin = np.isfinite(zn)
++    nn = int(fin.sum())
++    wzlbno = 0.0
++    wchi = 0.0
++    if nn >= 2:
++        jb = int(np.nanargmax(zn))
++        m = ok & (ne != jb)
++        wzlbno = float(np.sum(w[m] * oo[m]) / math.sqrt(np.sum(w[m] ** 2))) if m.any() else 0.0
++        # flux consistency: per-night flux estimates zn/wn vs the weighted mean, chi^2 / dof
++        fl = zn[fin] / wn[fin]; iv = wn[fin] ** 2
++        mu = float(np.sum(fl * iv) / np.sum(iv))
++        wchi = float(np.sum((fl - mu) ** 2 * iv) / (nn - 1))
++    return {"wzon": wzon, "wzlbno": wzlbno, "wchi": wchi, "wnpos": int(np.sum(zn[fin] > 1.5)),
++            "wzn": [None if not np.isfinite(x) else round(float(x), 3) for x in zn]}
++
++
+ def night_of(t):
+     return np.floor(np.asarray(t) - 0.5).astype(int)
+ 
+@@ -289,10 +346,12 @@
+     if res is None:
+         res = [_one_exposure(j) for j in jobs]
+     ncomp = sum(1 for rr in res if rr[1])
++    sqd = np.full((C, E), np.nan, np.float32)    # gen 134: sqrt(den) of the on measurement (weight-map depth)
+     for ie, (rr, _ok) in enumerate(res):
+-        for c_, p_, s in rr:
++        for c_, p_, s, sq in rr:
+             if p_ == 0:
+                 on[c_, ie] = s
++                sqd[c_, ie] = sq
+             else:
+                 off[c_, ie, p_ - 1] = s
+     # off positions closer than 3" to the on position (slow mover / close nights) still hold the body's own flux
+@@ -317,6 +376,11 @@
+             md, sd = gmed, gsd
+         on[:, ie] = (on[:, ie] - md) / sd
+         off[:, ie, :] = (off[:, ie, :] - md) / sd
++        sqd[:, ie] = sqd[:, ie] / sd
++    # gen 134: expected S/N per unit physical flux of a red TNO in each measurement (matched-filter weights):
++    # flux in ADU = F * 10^(0.4 (zp - 30)) * colour(band); its normalised S/N = ADU flux * sqrt(den) / sd.
++    gz = _gain([rows[e] for e in sel])
++    wgt = sqd * gz[None, :]
+     log(f"vet: null median {gmed:.2f} sd {gsd:.2f} over {allv.size} off-track samples")
+     # features
+     ne = np.array([nidx[nt[e]] for e in sel])
+@@ -361,9 +425,14 @@
+             chi = float(np.sum((zz - mu) ** 2) / (nn - 1))
+         else:
+             chi = 0.0
+-        feats.append({"zon": zon, "zlbno": zlbno, "zoff": zoff, "zoffmax": zoffmax, "npos": npos, "nnight": nn,
+-                      "chi": chi, "nexp": int(ok.sum()),
+-                      "zn": [None if not np.isfinite(x) else round(float(x), 3) for x in zn]})
++        fd = {"zon": zon, "zlbno": zlbno, "zoff": zoff, "zoffmax": zoffmax, "npos": npos, "nnight": nn,
++              "chi": chi, "nexp": int(ok.sum()),
++              "zn": [None if not np.isfinite(x) else round(float(x), 3) for x in zn]}
++        try:
++            fd.update(_wfeat(o, wgt[c], ne, NN))
++        except Exception:
++            pass
++        feats.append(fd)
+     log(f"vet: {C} candidates x {E} exposures in {time.time() - t_start:.1f}s; measured {sum(f is not None for f in feats)}")
+     return feats
+ 
+--- history/gen133/submission/finder.py	2026-11-08 07:12:44
++++ submission/finder.py	2026-11-08 08:36:16
+@@ -194,8 +194,33 @@
+ VET_N = int(float(os.environ.get("TNO_VET_N", "200")))
+ 
+ 
++# gen 134 (TNO_VET_WF): vet.py also returns matched-filter versions of the on-track statistics (each exposure weighted by
++# the expected S/N of a red TNO: 10^(0.4 zp) x colour x weight-map depth / empirical null width).  1 = use them in place
++# of the equal-weight zon / zlbno / npos / chi; 2 = the larger of the two zlbno / zon; 0 = gen133 (default, see NOTES).
++VET_WF = int(float(os.environ.get("TNO_VET_WF", "0") or 0))
++
++
++def vet_wsub(f, mode=None):
++    mode = VET_WF if mode is None else mode
++    if f is None or not mode or "wzlbno" not in f:
++        return f
++    try:
++        g = dict(f)
++        if mode == 1:
++            g["zon"] = float(f["wzon"]); g["zlbno"] = float(f["wzlbno"]); g["npos"] = int(f["wnpos"])
++            zn = [float(x) for x in f.get("wzn") or [] if x is not None]
++            if len(zn) >= 2:
++                g["chi"] = float(np.var(zn, ddof=1))
++        elif mode == 2:
++            g["zon"] = max(float(f["zon"]), float(f["wzon"])); g["zlbno"] = max(float(f["zlbno"]), float(f["wzlbno"]))
++        return g
++    except Exception:
++        return f
++
++
+ def vet_adjust(cs, fs):
+     """Return a copy of cs with p re-weighted from the vet features (None features: unchanged)."""
++    fs = [vet_wsub(f) for f in fs]
+     out = []
+     nd = 0
+     for c, f in zip(cs, fs):

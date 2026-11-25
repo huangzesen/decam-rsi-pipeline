@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DECam Deep Search</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#070a12; --bg2:#0b1020; --panel:#0f1528; --panel2:#131a31; --line:#1f2943; --line2:#2a3657;
+  --ink:#e8ecf6; --ink2:#aab3c8; --ink3:#6f7a95; --accent:#f2c46d; --accent2:#7fb2ff;
+  --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#d55181; --s5:#a07cf5; --s6:#3fb6c6; --s7:#8c96a8;
+  --serif:"Instrument Serif",Georgia,"Times New Roman",serif; --sans:"Hanken Grotesk",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
+body{background:radial-gradient(1200px 600px at 70% -10%,#18214180,transparent 60%),radial-gradient(900px 500px at -10% 10%,#1a133080,transparent 60%),var(--bg)}
+a{color:var(--accent2);text-decoration:none} a:hover{text-decoration:underline}
+.wrap{max-width:1240px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:#070a12d9;backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:#070a12}
+header.top .wrap{display:flex;align-items:center;gap:20px;padding-block:12px;flex-wrap:wrap}
+.brand{font-family:var(--serif);font-size:22px;letter-spacing:.2px;color:var(--ink)}
+.brand em{color:var(--accent);font-style:italic}
+nav{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;letter-spacing:.06em;text-transform:uppercase}
+nav a{color:var(--ink2)} nav a:hover{color:var(--ink);text-decoration:none}
+nav a.cta{color:var(--bg);background:var(--accent);padding:4px 10px;border-radius:999px;font-weight:600}
+.asof{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+section{padding-block:34px;border-bottom:1px solid var(--line)}
+h1{font-family:var(--serif);font-weight:400;font-size:clamp(34px,5vw,58px);line-height:1.04;margin:6px 0 10px;text-wrap:balance}
+h1 em{color:var(--accent)}
+h2{font-family:var(--serif);font-weight:400;font-size:clamp(26px,3.2vw,36px);margin:0 0 6px;text-wrap:balance}
+.kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.lede{color:var(--ink2);max-width:72ch;margin:0 0 18px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0 20px}
+.stat{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.stat b{display:block;font-family:var(--serif);font-weight:400;font-size:30px;line-height:1.1;color:var(--ink)}
+.stat span{font-size:12px;color:var(--ink3);letter-spacing:.02em}
+.skybox{position:relative;background:radial-gradient(ellipse at center,#0d1430 0%,#080c18 70%);border:1px solid var(--line);border-radius:16px;padding:10px;overflow:hidden}
+#sky{display:block;width:100%;height:auto;cursor:crosshair}
+.tip{position:absolute;pointer-events:none;background:#0b1020f2;border:1px solid var(--line2);border-radius:8px;padding:8px 10px;font-size:12.5px;min-width:180px;display:none;box-shadow:0 8px 24px #0008}
+.tip b{font-family:var(--mono);font-weight:500}
+.legend{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:12px;font-size:13px;color:var(--ink2)}
+.legend span{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.legend span.off{opacity:.35}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+.sw.prep{background:transparent!important;border:2px solid}
+.bar{display:flex;height:14px;border-radius:999px;overflow:hidden;background:#1a2240;margin:14px 0 6px;border:1px solid var(--line)}
+.bar i{display:block;height:100%}
+.barlbl{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--ink2)}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;margin-top:14px}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:860px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:600;background:var(--panel)}
+td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right} th.num{text-align:right}
+tr:last-child td{border-bottom:none}
+.chip{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--ink2)}
+.chip.searched{color:#bdf0d7;border-color:#2b6b52;background:#123326}
+.chip.search{color:#e3d7ff;border-color:#5b47a0;background:#1e1640}
+.chip.prep{color:#cfe9ee;border-color:#2c5e66;background:#0f2a2f}
+.meter{width:90px;height:6px;background:#1a2240;border-radius:6px;display:inline-block;vertical-align:middle;margin-left:8px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-top:16px}
+.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--line2);transform:translateY(-2px)}
+.card .hd{display:flex;align-items:baseline;gap:8px}
+.card .lab{font-family:var(--serif);font-size:24px;line-height:1}
+.card .cid{font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+.card .st{margin-left:auto}
+.card .size{font-family:var(--serif);font-size:19px;color:var(--accent)}
+.card .size small{font-family:var(--sans);font-size:12px;color:var(--ink3)}
+.card .orb{font-family:var(--mono);font-size:12px;color:var(--ink2)}
+.card .sum{font-size:13px;color:var(--ink2)}
+.ladder{display:flex;gap:3px} .ladder i{flex:1;height:5px;border-radius:3px;background:#222b45}
+.ladder i.pass{background:#3ccf8e} .ladder i.partial{background:#d9a441} .ladder i.fail{background:#d0575c} .ladder i.todo{background:#3a4566}
+.card a.more{font-size:12.5px;margin-top:auto}
+.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+.filters input,.filters select{background:var(--panel);color:var(--ink);border:1px solid var(--line2);border-radius:8px;padding:7px 10px;font:inherit;font-size:13.5px}
+.filters input{flex:1 1 220px;min-width:0}
+.cnt{font-size:12.5px;color:var(--ink3);margin-left:auto}
+table.sortable th{cursor:pointer;user-select:none} table.sortable th.on{color:var(--accent)}
+#alltbl td a{color:var(--ink)} #alltbl td a b{font-family:var(--serif);font-weight:400;font-size:17px}
+#alltbl .ladder{width:84px}
+.climb{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:14px}
+#climb{width:100%;height:auto;display:block}
+.two{display:grid;grid-template-columns:1.3fr 1fr;gap:20px;align-items:start}
+@media (max-width:860px){.two{grid-template-columns:1fr}}
+ol.log{list-style:none;margin:14px 0 0;padding:0;border-left:1px solid var(--line2)}
+ol.log li{position:relative;padding:0 0 14px 18px;color:var(--ink2);font-size:14px}
+ol.log li::before{content:"";position:absolute;left:-5px;top:7px;width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px #f2c46d22}
+ol.log time{display:block;font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+.links{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px}
+.links a{display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;color:var(--ink)}
+.links a:hover{border-color:var(--accent);text-decoration:none}
+.links a b{font-family:var(--serif);font-weight:400;font-size:21px;display:block}
+.links a span{font-size:13px;color:var(--ink2)}
+footer{padding-block:26px 40px;color:var(--ink3);font-size:12.5px}
+@media (max-width:600px){.asof{display:none} nav{gap:10px;font-size:11.5px} .stat b{font-size:24px}}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <div class="brand">DECam <em>deep</em> search</div>
+  <nav><a href="#sky-sec">Sky</a><a href="#slices">Slices</a><a href="#new">New objects</a><a href="#all">All candidates</a><a href="#climb-sec">Program</a><a href="#log">Log</a><a class="cta" href="catalogue/">Catalogue</a></nav>
+  <div class="asof" id="asof"></div>
+</div></header>
+
+<main>
+<section id="sky-sec"><div class="wrap">
+  <div class="kicker">Whole-sky scan</div>
+  <h1>Searching every public DECam exposure for <em>large distant bodies</em></h1>
+  <p class="lede">Thirteen years of the Dark Energy Camera's public archive, searched 5 % of its sky at a time by a program that AI agents wrote and keep improving. Each cell below is 3° × 3°; coloured cells have been searched, shaded ones are waiting.</p>
+  <div class="stats" id="stats"></div>
+  <div class="skybox"><canvas id="sky" width="1200" height="600" aria-label="Map of the sky in a Hammer projection showing which DECam cells have been searched"></canvas><div class="tip" id="tip"></div></div>
+  <div class="legend" id="legend"></div>
+  <div class="bar" id="bar"></div>
+  <div class="barlbl" id="barlbl"></div>
+</div></section>
+
+<section id="slices"><div class="wrap">
+  <div class="kicker">5 % at a time</div>
+  <h2>The slices</h2>
+  <p class="lede">Each slice is about 1,580 deg² of DECam sky, chosen for repeated seasons of coverage near the ecliptic (later ones weighted to what the LDT can observe this winter). A slice is downloaded and run through source detection at NERSC, then searched region by region on NERSC A100 and Vista GH200 GPUs. Recall is the share of known bodies that the data could show which the program found.</p>
+  <div class="tablewrap"><table id="tbl"></table></div>
+</div></section>
+
+<section id="new"><div class="wrap">
+  <div class="kicker">Leading new objects</div>
+  <h2>Candidates seen again in other telescopes' images</h2>
+  <p class="lede" id="newlede"></p>
+  <div class="grid" id="cards"></div>
+  <div class="legend" style="margin-top:14px"><span><i class="sw" style="background:#3ccf8e"></i>check passed</span><span><i class="sw" style="background:#d9a441"></i>partly</span><span><i class="sw" style="background:#3a4566"></i>to do</span><span><i class="sw" style="background:#d0575c"></i>failed</span><span style="cursor:default">Bars: found · seen again in our data · not in the MPC's files · not on fixed sources · seen in other archives · reported</span></div>
+</div></section>
+
+<section id="all"><div class="wrap">
+  <div class="kicker">Full candidate list</div>
+  <h2>Every candidate</h2>
+  <p class="lede" id="alllede"></p>
+  <div class="filters">
+    <input id="q" type="search" placeholder="Search label, number, search…" aria-label="Search candidates">
+    <select id="fstage" aria-label="Stage"></select>
+    <select id="fsearch" aria-label="Search"></select>
+    <span id="count" class="cnt"></span>
+  </div>
+  <div class="tablewrap"><table id="alltbl" class="sortable"></table></div>
+</div></section>
+
+<section id="climb-sec"><div class="wrap two">
+  <div>
+    <div class="kicker">The program</div>
+    <h2>Written by agents, round after round</h2>
+    <p class="lede">The search program comes from a hill climb: each round an agent reads every earlier program and its results, writes a new one, and it is graded on four sky regions by how many findable known bodies it recovers and how much GPU time it takes. Every 5 % slice runs the best program at the time it starts.</p>
+    <div class="climb"><svg id="climb" viewBox="0 0 640 300" role="img" aria-label="Recall of known bodies by generation"></svg></div>
+  </div>
+  <div id="log">
+    <div class="kicker">What we have done</div>
+    <h2>Log</h2>
+    <ol class="log" id="loglist"></ol>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <div class="kicker">More</div>
+  <h2>Pages</h2>
+  <div class="links">
+    <a href="catalogue/"><b>Catalogue of every candidate</b><span>All promising bodies with their evidence, orbit charts and size, one card each.</span></a>
+    <a href="catalogue/#ldt"><b>Next 14 nights at the LDT</b><span>Which candidates are up, when, and how bright: sky dome, altitude timeline, nightly plan.</span></a>
+  </div>
+</div></section>
+</main>
+<footer><div class="wrap" id="foot"></div></footer>
+
+<script>
+const D = /*DATA*/null;
+const COL = {s1:"#3987e5",s2:"#199e70",s3:"#c98500",s4:"#d55181",s5:"#a07cf5",s6:"#3fb6c6",s7:"#8c96a8",s8:"#e0703a",s9:"#6aa84f",s10:"#c27ba0",s11:"#4f9fd8",s12:"#b5a33b",s13:"#d9534f",s14:"#5b8c85"};
+const SL = Object.fromEntries(D.slices.map(s=>[s.id,s]));
+const fmt = n => n==null ? "—" : Number(n).toLocaleString("en-US");
+document.getElementById("asof").textContent = "updated " + D.asof + " PT";
+
+// ---- stats
+(function(){
+  const done = D.slices.filter(s=>s.state==="searched"), act = D.slices.filter(s=>s.state!=="searched");
+  const deg = done.reduce((a,s)=>a+s.deg2,0), expo = done.reduce((a,s)=>a+s.exposures,0);
+  const fo = done.reduce((a,s)=>a+(s.stats?s.stats.found:0),0), fa = done.reduce((a,s)=>a+(s.stats?s.stats.findable:0),0);
+  const gpu = done.reduce((a,s)=>a+(s.stats?s.stats.gpu_h:0),0);
+  const S = [[ (100*deg/D.cover_deg2).toFixed(1)+" %", `of DECam's ${fmt(D.cover_deg2)} deg² searched`],
+             [fmt(deg)+" deg²", `${done.length} slices done, ${act.length} under way`],
+             [fmt(expo), `of ${fmt(D.n_exp)} public exposures searched`],
+             [fmt(fo)+" / "+fmt(fa), "findable known bodies recovered"],
+             [fmt(Math.round(gpu)), "GPU-hours of search"],
+             [fmt(D.ncards), "candidates in the catalogue"]];
+  document.getElementById("stats").innerHTML = S.map(([b,s])=>`<div class="stat"><b>${b}</b><span>${s}</span></div>`).join("");
+})();
+
+// ---- sky map (Hammer projection, RA increasing to the left, centred on RA 180)
+const R = Math.PI/180, cv = document.getElementById("sky"), ctx = cv.getContext("2d"), tip = document.getElementById("tip");
+const hidden = new Set();
+const CELL = new Map(D.cells.map(c=>[c[0],{e:c[1],s:c[2]}]));
+function hammer(ra, dec){ let l = ((ra-180+540)%360)-180; l = -l*R; const p = dec*R, z = Math.sqrt(1+Math.cos(p)*Math.cos(l/2));
+  return [2*Math.SQRT2*Math.cos(p)*Math.sin(l/2)/z, Math.SQRT2*Math.sin(p)/z]; }
+function inv(x, y){ const z = Math.sqrt(1-(x/4)**2-(y/2)**2); if (!(z>0) || (x/(2*Math.SQRT2))**2+(y/Math.SQRT2)**2>1) return null;
+  const l = 2*Math.atan2(z*x, 2*(2*z*z-1)), p = Math.asin(z*y); return [((-l/R)+180+360)%360, p/R]; }
+function cellOf(ra, dec){ const b = Math.min(59, Math.max(0, Math.floor((dec+90)/3))), dc = -90+3*b+1.5, n = Math.max(1, Math.floor(360*Math.cos(dc*R)/3));
+  return b*1000 + (Math.floor(ra/360*n)%n); }
+function cellBox(k){ const b = Math.floor(k/1000), c = k%1000, dc = -90+3*b+1.5, n = Math.max(1, Math.floor(360*Math.cos(dc*R)/3));
+  return [c*360/n, (c+1)*360/n, dc-1.5, dc+1.5]; }
+let W, H, sc, ox, oy;
+function geom(){ const w = cv.clientWidth || 1200, dpr = Math.min(2, window.devicePixelRatio||1);
+  cv.width = Math.round(w*dpr); cv.height = Math.round(w*0.52*dpr); W = cv.width; H = cv.height; sc = (W*0.97)/(4*Math.SQRT2); ox = W/2; oy = H/2;
+  cv.style.height = (w*0.52)+"px"; }
+const P = (ra,dec)=>{ const [x,y]=hammer(ra,dec); return [ox+x*sc, oy-y*sc]; };
+function line(pts, style, width, dash){ ctx.beginPath(); let prev=null;
+  for (const [ra,dec] of pts){ const [x,y]=P(ra,dec); if (prev && Math.abs(x-prev[0])>W/3) ctx.moveTo(x,y); else if(prev) ctx.lineTo(x,y); else ctx.moveTo(x,y); prev=[x,y]; }
+  ctx.strokeStyle=style; ctx.lineWidth=width; ctx.setLineDash(dash||[]); ctx.stroke(); ctx.setLineDash([]); }
+function eq(lam, beta, eps){ // ecliptic (eps=23.44) to equatorial
+  const l=lam*R,b=beta*R,e=eps*R, x=Math.cos(b)*Math.cos(l), y=Math.cos(b)*Math.sin(l)*Math.cos(e)-Math.sin(b)*Math.sin(e), z=Math.cos(b)*Math.sin(l)*Math.sin(e)+Math.sin(b)*Math.cos(e);
+  return [(Math.atan2(y,x)/R+360)%360, Math.asin(z)/R]; }
+function gal(l){ // galactic plane b=0 to equatorial (J2000)
+  const lr=l*R, x=Math.cos(lr), y=Math.sin(lr), z=0;
+  const M=[[-0.0548755604,0.4941094279,-0.8676661490],[-0.8734370902,-0.4448296300,-0.1980763734],[-0.4838350155,0.7469822445,0.4559837762]];
+  const X=M[0][0]*x+M[1][0]*y+M[2][0]*z, Y=M[0][1]*x+M[1][1]*y+M[2][1]*z, Z=M[0][2]*x+M[1][2]*y+M[2][2]*z;
+  return [(Math.atan2(Y,X)/R+360)%360, Math.asin(Z)/R]; }
+let pulse = 0;
+function draw(){
+  geom(); ctx.clearRect(0,0,W,H);
+  // sky ellipse
+  ctx.beginPath(); ctx.ellipse(ox,oy,2*Math.SQRT2*sc,Math.SQRT2*sc,0,0,2*Math.PI); ctx.fillStyle="#0a1024"; ctx.fill(); ctx.strokeStyle="#2a3657"; ctx.lineWidth=1.2; ctx.stroke();
+  for (let ra=0; ra<360; ra+=30){ const pts=[]; for(let d=-90; d<=90; d+=3) pts.push([ra+1e-6,d]); line(pts,"#1c2645",1); }
+  for (let d=-60; d<=60; d+=30){ const pts=[]; for(let ra=0; ra<=360; ra+=2) pts.push([Math.min(ra,359.999),d]); line(pts,"#1c2645",1); }
+  const maxe = Math.log10(1+Math.max(...D.cells.map(c=>c[1])));
+  for (const [k,c] of CELL){
+    const [r0,r1,d0,d1] = cellBox(k), pts=[P(r0,d0),P(r1,d0),P(r1,d1),P(r0,d1)];
+    if (Math.abs(pts[0][0]-pts[1][0])>W/3) continue;
+    ctx.beginPath(); ctx.moveTo(...pts[0]); for (let i=1;i<4;i++) ctx.lineTo(...pts[i]); ctx.closePath();
+    const s = c.s && !hidden.has(c.s) ? SL[c.s] : null;
+    if (s && s.state==="searched"){ ctx.fillStyle = COL[c.s]; ctx.globalAlpha = .92; ctx.fill(); }
+    else if (s && s.state==="search"){ ctx.fillStyle = COL[c.s]; ctx.globalAlpha = .45+.35*Math.abs(Math.sin(pulse)); ctx.fill(); }
+    else if (s){ ctx.globalAlpha=.9; ctx.strokeStyle = COL[c.s]; ctx.lineWidth = Math.max(1, W/900); ctx.stroke(); ctx.globalAlpha=.18; ctx.fillStyle=COL[c.s]; ctx.fill(); }
+    else { const t = Math.log10(1+c.e)/maxe; ctx.fillStyle = `rgba(150,170,215,${(0.05+0.32*t).toFixed(3)})`; ctx.globalAlpha=1; ctx.fill(); }
+    ctx.globalAlpha=1;
+  }
+  const ecl=[]; for(let l=0;l<=360;l+=2) ecl.push(eq(l,0,23.4393)); line(ecl,"#f2c46dcc",Math.max(1.2,W/800),[6,5]);
+  const gp=[]; for(let l=0;l<=360;l+=2) gp.push(gal(l)); line(gp,"#7fb2ff88",Math.max(1,W/1000),[2,4]);
+  ctx.font = `${Math.round(W/95)}px JetBrains Mono, monospace`; ctx.fillStyle="#6f7a95";
+  for (let ra=0; ra<360; ra+=60){ const [x,y]=P(ra===0?0.01:ra,0); ctx.fillText(ra+"°", x+4, y-4); }
+  ctx.fillStyle="#f2c46d"; const [ex,ey]=P(...eq(250,0,23.44)); ctx.fillText("ecliptic", ex+6, ey+14);
+  ctx.fillStyle="#7fb2ff"; const [gx,gy]=P(...gal(40)); ctx.fillText("Milky Way", gx+6, gy-6);
+}
+function anim(){ pulse += 0.035; if (D.slices.some(s=>s.state==="search")) { draw(); } setTimeout(()=>requestAnimationFrame(anim), 80); }
+draw(); anim(); window.addEventListener("resize", draw);
+cv.addEventListener("mousemove", ev=>{
+  const r = cv.getBoundingClientRect(), dpr = cv.width/r.width, x=(ev.clientX-r.left)*dpr, y=(ev.clientY-r.top)*dpr;
+  const q = inv((x-ox)/sc, (oy-y)/sc); if (!q){ tip.style.display="none"; return; }
+  const k = cellOf(q[0], q[1]), c = CELL.get(k);
+  let h = `<b>RA ${q[0].toFixed(0)}°, Dec ${q[1].toFixed(0)}°</b><br>`;
+  if (!c) h += "no public DECam exposures";
+  else { const s = c.s ? SL[c.s] : null; h += `${fmt(c.e)} exposures<br>` + (s ? `<span style="color:${COL[c.s]}">● ${s.name}</span> · ${s.stage}` : "not searched yet"); }
+  tip.innerHTML = h; tip.style.display = "block";
+  const bx = cv.parentElement.getBoundingClientRect(); let lx = ev.clientX-bx.left+14, ly = ev.clientY-bx.top+14;
+  if (lx > bx.width-200) lx -= 220; tip.style.left = lx+"px"; tip.style.top = ly+"px"; });
+cv.addEventListener("mouseleave", ()=>{ tip.style.display="none"; });
+
+// ---- legend and progress bar
+(function(){
+  const lg = document.getElementById("legend");
+  lg.innerHTML = D.slices.map(s=>`<span data-s="${s.id}" title="${s.note}"><i class="sw ${s.state==='prep'?'prep':''}" style="background:${COL[s.id]};border-color:${COL[s.id]}"></i>${s.name} · ${s.state==="searched"?"searched":s.state==="search"?"searching":"preparing"}</span>`).join("")
+    + `<span style="cursor:default"><i class="sw" style="background:rgba(150,170,215,.3)"></i>not searched yet (shade: number of exposures)</span>`
+    + `<span style="cursor:default"><i class="sw" style="background:none;border-top:2px dashed #f2c46d;border-radius:0;height:0;width:16px"></i>ecliptic</span>`;
+  lg.querySelectorAll("span[data-s]").forEach(el=>el.addEventListener("click",()=>{ const s=el.dataset.s; hidden.has(s)?hidden.delete(s):hidden.add(s); el.classList.toggle("off"); draw(); }));
+  const by = st => D.slices.filter(s=>s.state===st).reduce((a,s)=>a+s.deg2,0);
+  const a = by("searched"), b = by("search"), c = by("prep"), rest = Math.max(0, D.cover_deg2-a-b-c), T = D.cover_deg2;
+  document.getElementById("bar").innerHTML = D.slices.map(s=>`<i title="${s.name}: ${fmt(s.deg2)} deg²" style="width:${100*s.deg2/T}%;background:${COL[s.id]};opacity:${s.state==='searched'?1:s.state==='search'?.7:.35}"></i>`).join("");
+  document.getElementById("barlbl").innerHTML = `<span><b style="color:var(--ink)">${(100*a/T).toFixed(1)} %</b> searched</span><span>${(100*b/T).toFixed(1)} % searching</span><span>${(100*c/T).toFixed(1)} % preparing</span><span>${(100*rest/T).toFixed(1)} % of DECam's sky still to go</span>`;
+})();
+
+// ---- slices table
+(function(){
+  const rows = D.slices.map(s=>{
+    const st = s.stats, chip = `<span class="chip ${s.state}">${s.stage}</span>`;
+    let prog = "";
+    if (s.progress && s.progress.done!=null && s.state==="search") prog = `${s.progress.done}/${s.progress.regions} regions<span class="meter"><i style="width:${100*s.progress.done/s.progress.regions}%"></i></span>`;
+    else if (s.progress && s.progress.detect_left!=null) prog = `detection: ${fmt(s.progress.detect_left)} exposures left`;
+    else if (s.searched_at) prog = s.searched_at;
+    return `<tr><td><i class="sw" style="background:${COL[s.id]}"></i> <b>${s.name}</b></td><td>${chip}</td><td>${prog}</td>
+      <td class="num">${fmt(s.deg2)}</td><td class="num">${fmt(s.regions)}</td><td class="num">${fmt(s.exposures)}</td><td class="num">${s.tb.toFixed(1)}</td>
+      <td class="num">${st?((100*st.found/st.findable).toFixed(0)+" %"):"—"}</td><td class="num">${st?fmt(st.found)+" / "+fmt(st.findable):"—"}</td>
+      <td class="num">${st?fmt(st.leads):"—"}</td><td class="num">${st?st.gpu_h.toFixed(1):"—"}</td><td>${st?st.programs.join(", "):"—"}</td></tr>`; });
+  document.getElementById("tbl").innerHTML = `<thead><tr><th>Slice</th><th>Status</th><th>Progress</th><th class="num">deg²</th><th class="num">Regions</th><th class="num">Exposures</th><th class="num">TB</th><th class="num">Recall</th><th class="num">Known found</th><th class="num">Leads</th><th class="num">GPU-h</th><th>Program</th></tr></thead><tbody>${rows.join("")}</tbody>`;
+})();
+
+// ---- leading new objects
+(function(){
+  document.getElementById("newlede").textContent = `The strongest of the ${D.ncards} candidates: two already reported to the Minor Planet Center, then every body that another telescope or another DECam program also recorded on at least two nights at the place its orbit predicts, largest first. Sizes assume an albedo of 0.10 to 0.05. Sky positions of unreported bodies are not shown.`;
+  const cards = D.top.map(c=>{
+    const size = c.D ? `${fmt(c.D[0])}–${fmt(c.D[1])} <small>km</small>` : (c.facts||[]).find(f=>f[0]==="Size") ? (c.facts.find(f=>f[0]==="Size")[1]) : "";
+    const orb = c.a!=null ? `a ${(+c.a).toFixed(1)} au · e ${(+c.e).toFixed(2)} · i ${(+c.i).toFixed(1)}°` + (c.r?` · now ${(+c.r).toFixed(0)} au`:"") : "";
+    const arc = [c.nights?`${c.nights} nights`:"", c.arc?`${(+c.arc).toFixed(1)}-year arc`:"", c.H!=null?`H ${(+c.H).toFixed(1)}`:""].filter(Boolean).join(" · ");
+    const sum = c.summary || (c.facts||[]).map(f=>f[1]).slice(0,2).join(" · ");
+    const lad = (c.ladder||[]).map(s=>`<i class="${s.state}" title="${s.step.replace(/_/g,' ')}: ${s.state}"></i>`).join("");
+    const chip = c.stage==="filed" ? `<span class="chip searched">reported</span>` : `<span class="chip">seen elsewhere</span>`;
+    const uns = (c.ladder||[]).some(s=>s.step==="not_in_mpc" && s.state==="partial") ? ` <span class="chip" title="the known-body check is unsure: a catalogued body fits about as well">identity unsure</span>` : "";
+    return `<article class="card"><div class="hd"><span class="lab">${c.label||c.cid}</span><span class="cid">${c.label?c.cid:""}</span><span class="st">${chip}${uns}</span></div>
+      ${size?`<div class="size">${size}</div>`:""}<div class="orb">${orb}</div><div class="orb">${arc}</div>${sum?`<div class="sum">${sum}</div>`:""}
+      <div class="ladder">${lad}</div><a class="more" href="catalogue/#${c.cid}">Evidence in the catalogue →</a></article>`; });
+  document.getElementById("cards").innerHTML = cards.join("");
+})();
+
+// ---- every candidate: sortable, filterable table
+(function(){
+  const A = D.all, stages = [...new Set(A.map(c=>c.stageTxt))].sort(), searches = [...new Set(A.map(c=>c.search||"—"))].sort();
+  document.getElementById("alllede").textContent = `All ${A.length} active candidates in the database, from every search. Click a column to sort; each row opens the body's full evidence card in the catalogue. Sizes assume an albedo of 0.10 to 0.05; known bodies found later are dropped from this list.`;
+  const fs = document.getElementById("fstage"), fr = document.getElementById("fsearch");
+  fs.innerHTML = `<option value="">All stages</option>` + stages.map(x=>`<option>${x}</option>`).join("");
+  fr.innerHTML = `<option value="">All searches</option>` + searches.map(x=>`<option>${x}</option>`).join("");
+  const COLS = [["Body", c=>c.label||c.cid], ["Stage", c=>c.stageTxt], ["Size (km)", c=>c.D?c.D[0]:-1, true], ["H", c=>c.H??99, true],
+    ["a (au)", c=>c.a??-1, true], ["e", c=>c.e??-1, true], ["i (°)", c=>c.i??-1, true], ["Now (au)", c=>c.r??-1, true],
+    ["Nights", c=>c.nights??-1, true], ["Arc (yr)", c=>c.arc??-1, true], ["Search", c=>c.search||""], ["Evidence", c=>(c.ladder||[]).filter(s=>s.state==="pass").length, true]];
+  let key = 3, dir = 1;
+  const num = (v,d)=> v==null||v<0||v===99 ? "—" : (+v).toFixed(d);
+  function render(){
+    const q = document.getElementById("q").value.trim().toLowerCase(), st = fs.value, sr = fr.value;
+    let rows = A.filter(c => (!st || c.stageTxt===st) && (!sr || (c.search||"—")===sr) &&
+      (!q || [c.label,c.cid,c.name,c.search,c.stageTxt].join(" ").toLowerCase().includes(q)));
+    const f = COLS[key][1]; rows.sort((x,y)=>{ const a=f(x), b=f(y); return (a<b?-1:a>b?1:0)*dir; });
+    document.getElementById("count").textContent = `${rows.length} of ${A.length}`;
+    document.getElementById("alltbl").innerHTML = `<thead><tr>${COLS.map((c,i)=>`<th data-i="${i}" class="${c[2]?'num ':''}${i===key?'on':''}">${c[0]}${i===key?(dir>0?' ↑':' ↓'):''}</th>`).join("")}</tr></thead><tbody>` +
+      rows.map(c=>`<tr><td><a href="catalogue/#${c.cid}"><b>${c.label||c.cid}</b></a> <span class="cid" style="font-family:var(--mono);font-size:11px;color:var(--ink3)">${c.label?c.cid:""}</span></td>
+        <td><span class="chip">${c.stageTxt}</span>${(c.ladder||[]).some(s=>s.step==="not_in_mpc" && s.state==="partial")?` <span class="chip" title="the known-body check is unsure: a catalogued body fits about as well">identity unsure</span>`:""}</td><td class="num">${c.D?`${c.D[0]}–${c.D[1]}`:"—"}</td><td class="num">${num(c.H,1)}</td>
+        <td class="num">${num(c.a,1)}</td><td class="num">${num(c.e,2)}</td><td class="num">${num(c.i,1)}</td><td class="num">${num(c.r,0)}</td>
+        <td class="num">${c.nights??"—"}</td><td class="num">${num(c.arc,1)}</td><td>${c.search||"—"}</td>
+        <td><div class="ladder">${(c.ladder||[]).map(s=>`<i class="${s.state}" title="${s.step.replace(/_/g,' ')}: ${s.state}"></i>`).join("")}</div></td></tr>`).join("") + "</tbody>";
+    document.querySelectorAll("#alltbl th").forEach(th=>th.addEventListener("click",()=>{ const i=+th.dataset.i; if(i===key) dir=-dir; else { key=i; dir = COLS[i][2] && i!==3 ? -1 : 1; } render(); }));
+  }
+  ["q","fstage","fsearch"].forEach(id=>document.getElementById(id).addEventListener("input", render)); render();
+})();
+
+// ---- hill climb chart
+(function(){
+  const pts = D.climb.pts, sv = document.getElementById("climb"), w=640, h=300, L=46, Rr=14, T=16, B=36;
+  const ys = pts.map(p=>p.r), y0 = Math.floor(Math.min(...ys)*10)/10, y1 = Math.ceil(Math.max(...ys)*10)/10;
+  const X = i => L + (w-L-Rr)*i/Math.max(1,pts.length-1), Y = v => T + (h-T-B)*(1-(v-y0)/(y1-y0));
+  let g = "";
+  for (let v=y0; v<=y1+1e-9; v+=0.1){ g += `<line x1="${L}" x2="${w-Rr}" y1="${Y(v)}" y2="${Y(v)}" stroke="#1f2943"/><text x="${L-8}" y="${Y(v)+4}" fill="#6f7a95" font-size="11" text-anchor="end" font-family="JetBrains Mono">${(v*100).toFixed(0)}%</text>`; }
+  let best = -1, run = [];
+  pts.forEach((p,i)=>{ best = Math.max(best,p.r); run.push([X(i),Y(best)]); });
+  g += `<polyline points="${run.map(q=>q.join(',')).join(' ')}" fill="none" stroke="#f2c46d" stroke-width="2"/>`;
+  pts.forEach((p,i)=>{ g += `<circle cx="${X(i)}" cy="${Y(p.r)}" r="3.2" fill="#7fb2ff" opacity=".8"><title>${p.g}: recall ${(p.r*100).toFixed(1)} %${p.h?`, ${(+p.h).toFixed(2)} GPU-h`:""}</title></circle>`; });
+  const bi = pts.findIndex(p=>p.g===D.climb.best);
+  if (bi>=0) g += `<circle cx="${X(bi)}" cy="${Y(pts[bi].r)}" r="7" fill="none" stroke="#f2c46d" stroke-width="2"/><text x="${X(bi)-10}" y="${Y(pts[bi].r)-12}" fill="#f2c46d" font-size="12" text-anchor="end" font-family="Hanken Grotesk">best: ${D.climb.best}, ${(D.climb.reward*100).toFixed(1)} %</text>`;
+  g += `<text x="${L}" y="${h-10}" fill="#6f7a95" font-size="11" font-family="Hanken Grotesk">generation 0 → ${pts.length-1} · dots: each program's graded recall · line: best so far</text>`;
+  sv.innerHTML = g;
+})();
+
+// ---- log and footer
+document.getElementById("loglist").innerHTML = D.done.map(([d,t])=>`<li><time>${d}</time>${t}</li>`).join("");
+document.getElementById("foot").innerHTML = `Built ${D.asof} PT from the search records; catalogue as of ${D.catalogue_asof}. Private page for collaborators; please don't pass it on.`;
+</script>
+</body>
+</html>

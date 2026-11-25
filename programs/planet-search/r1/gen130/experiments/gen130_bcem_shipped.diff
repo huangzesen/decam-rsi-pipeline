@@ -1,0 +1,68 @@
+1668a1669,1707
+>     # gen 130 (TNO_BCEM, default 1; 0 = gen129 per-seed loop): batched CEM.  The same algorithm as cem() (same sigmas,
+>     # elites, sigma floor, Z[0] = mu, 6 iterations) run on a block of BS seeds at once, so each iteration does ONE
+>     # predict/gather/sync for BS*K states instead of BS small ones.  CEM is CPU/launch-bound (numpy propagation + a GPU sync
+>     # per call), and on CUDA (K=384, ~54k seed caps, seeds ready only at ~0.8 B) the per-seed loop is cut by ref_deadline,
+>     # so a faster loop refines more seeds.  Results differ from the per-seed loop only through the RNG stream.
+>     BCEM = os.environ.get("TNO_BCEM", "1") != "0"
+>     BS = int(os.environ.get("TNO_BS", "0") or 0) or (48 if cuda else 16)
+>     BS = max(1, min(BS, int(3_000_000 // max(K * max(N, 1), 1))))
+> 
+>     def cem_b(S0, K_=K, iters=6):
+>         B_ = len(S0)
+>         r = np.linalg.norm(S0[:, :3], axis=1)
+>         TL = np.stack([tframe(x[:3]) for x in S0])                     # (B,3,3)
+>         base = np.array([1.5 * ARCR, 1.5 * ARCR, 0.6 * dv * SP, 0.6 * dv * SP, 0.03])
+>         sig = base[None] * r[:, None]
+>         mu = np.zeros((B_, 5))
+>         bestS = S0.copy(); bestv = np.full(B_, -1e9)
+>         ne = max(8, K_ // 16)
+>         ar = np.arange(B_)
+>         for itn in range(iters):
+>             Z = mu[:, None] + rng.standard_normal((B_, K_, 5)) * sig[:, None]
+>             Z[:, 0] = mu
+>             S = np.repeat(S0[:, None], K_, 1)                            # (B,K,6)
+>             S[..., :3] += Z[..., 0:1] * TL[:, None, 0] + Z[..., 1:2] * TL[:, None, 1]
+>             los = S[..., :3] - oref; losn = los / np.linalg.norm(los, axis=-1, keepdims=True)
+>             S[..., :3] += Z[..., 4:5] * losn
+>             S[..., 3:] += Z[..., 2:3] * TL[:, None, 0] + Z[..., 3:4] * TL[:, None, 1]
+>             v, c = score_states(S.reshape(-1, 6))
+>             tot = total(v, c).reshape(B_, K_)
+>             el = np.argsort(-tot, 1)[:, :ne]
+>             t0_ = tot[ar, el[:, 0]]
+>             upd = t0_ > bestv
+>             if upd.any():
+>                 bestv = np.where(upd, t0_, bestv)
+>                 bestS[upd] = S[ar[upd], el[upd, 0]]
+>             Ze = Z[ar[:, None], el]
+>             mu = Ze.mean(1); sig = np.maximum(Ze.std(1), sig * 0.3)
+>         return bestS
+> 
+1888c1927,1929
+<     for jj, j in enumerate(order_):
+---
+>     t_ref0 = time.time()
+>     nwr_ = 0
+>     for b0 in (range(0, len(order_), BS) if BCEM else ()):
+1890a1932,1949
+>         idx_ = order_[b0:b0 + BS]
+>         bS_ = cem_b(np.array(states[idx_], float))
+>         v, c = score_states(bS_)
+>         tt_ = total(v, c); ng_ = nights_good(v, c); n3_ = night3(v, c)
+>         tq_ = total(np.minimum(v, RCLIP), c) if RCLIP > 0 else np.zeros(len(idx_))
+>         for q_, j in enumerate(idx_):
+>             refined.append(bS_[q_]); rsc.append(tt_[q_]); rng_.append(ng_[q_]); rkd.append(skind[j])
+>             rsrc2.append(SRC2[0][0] <= j < SRC2[0][1])
+>             rn3.append(float(n3_[q_]))
+>             rscq.append(float(tq_[q_]) if RCLIP > 0 else 0.0)
+>         if len(refined) // 50 > nwr_:
+>             nwr_ = len(refined) // 50
+>             R = np.array(refined)
+>             write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3),
+>                                             scq=np.array(rscq) if RCLIP > 0 else None), score_states, t_ep))
+>     for jj, j in enumerate(() if BCEM else order_):
+>         if time.time() - T0 > ref_deadline:
+>             break
+1900a1960,1961
+>     log(f"refinement ({'batched BS=' + str(BS) if BCEM else 'per-seed'}): {len(refined)} of {len(order_)} seeds in "
+>         f"{time.time() - t_ref0:.1f}s, {time.time() - T0:.0f}s elapsed (ref_deadline {ref_deadline:.0f}s)")

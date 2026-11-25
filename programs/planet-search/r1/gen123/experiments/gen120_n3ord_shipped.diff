@@ -1,0 +1,28 @@
+--- ../../tmp/finder_stackd_gen118.py	2026-11-07 10:31:29
++++ stackd/finder.py	2026-11-07 10:31:29
+@@ -1503,6 +1503,25 @@
+     v0, c0 = score_states(states)
+     write_out(a.out, to_cands(states, total(v0, c0), nights_good(v0, c0)))
+     log(f"wrote {len(states)} seed states (pre-refinement)")
++    # gen 120 (TNO_NS_N3ORD, default 1; 0 = gen118): refinement is deadline-bound, so re-order the night seeds inside
++    # their own refinement slots (kind interleave and kind-2 null unchanged) by n3 (weight-2 statistic) at the seed state.
++    if os.environ.get("TNO_NS_N3ORD", "1") != "0":
++        try:
++            if len(skind) == len(states) and len(seed_sc) == len(states):
++                for kk_ in [int(x) for x in os.environ.get("TNO_NS_N3ORD_K", "1").split(",") if x.strip()]:
++                    i1_ = np.flatnonzero(skind == kk_)
++                    if len(i1_) < 2:
++                        continue
++                    key_ = night3(v0[i1_], c0[i1_]) + float(os.environ.get("TNO_NS_N3ORD_TW", "0.1")) * total(v0[i1_], c0[i1_])
++                    key_ = np.where(np.isfinite(key_), key_, -99.0)
++                    slots_ = np.sort(seed_sc[i1_])[::-1]
++                    new_ = i1_[np.argsort(-key_, kind="stable")]
++                    seed_sc = np.asarray(seed_sc, dtype=float).copy()
++                    seed_sc[new_] = slots_
++                    log(f"n3 order (kind {kk_}): {len(i1_)} seeds re-ordered; n3 top {np.sort(key_)[::-1][:5].round(2).tolist()}, "
++                        f"median {float(np.median(key_)):.2f}")
++        except Exception as ex:
++            log("n3 order failed:", repr(ex)[:200])
+ 
+     rng = np.random.default_rng(1)
+     K = 384 if cuda else 192

@@ -1,0 +1,1 @@
+`python3 finder.py --scen DIR --out OUT --budget-s 1800` searches one regional catalogue and writes its ranked moving-object linkages to `OUT/candidates.json`. Method and validation measurements are in `NOTES.md`.

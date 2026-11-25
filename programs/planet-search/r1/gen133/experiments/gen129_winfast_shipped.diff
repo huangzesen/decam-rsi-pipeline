@@ -1,0 +1,59 @@
+diff -ru -x experiments -x __pycache__ base/stackd/finder.py armC/stackd/finder.py
+--- base/stackd/finder.py	2026-11-08 00:29:16
++++ armC/stackd/finder.py	2026-11-08 00:35:34
+@@ -652,6 +652,7 @@
+     # night-collapsed d-frame co-adds (frames within DEEP_GSPAN d summed after the d-frame warp, so the cost scales
+     # with nights, not exposures).  Seeds weight-4-like bodies that only show in the all-exposure stack.
+     DEEP = os.environ.get("TNO_DEEP", "1") != "0"
++    WIN_FAST = os.environ.get("TNO_WIN_FAST", "1") != "0"   # gen 129: in-place window/deep shift-and-add (exact)
+     DEEP_VRAD = float(os.environ.get("TNO_DEEP_VRAD", "0.3"))
+     DEEP_DMIN = float(os.environ.get("TNO_DEEP_DMIN", "34")); DEEP_DMAX = float(os.environ.get("TNO_DEEP_DMAX", "52"))
+     DEEP_GSPAN = float(os.environ.get("TNO_DEEP_GSPAN", "0.08"))
+@@ -900,7 +901,46 @@
+                           m_ = float(torch.median(v_))
+                           Dm[k_] = torch.where(Dm[k_] != 0, Dm[k_] - m_, Dm[k_])
+                       del v_
+-              for h in range(len(VX)):
++              # gen 129 (TNO_WIN_FAST, default 1; 0 = gen128 loop): the same per-hypothesis ops in preallocated buffers
++              # (acc/max/better reused, best updated in place, bidx by masked_fill_ instead of full_like + where).
++              # Every value is computed by the same fp16 ops in the same order, so best/bidx/s1/s2 are bit-identical;
++              # it only drops ~8 canvas passes of allocation/copy traffic per hypothesis.
++              if WIN_FAST and Dm.shape[0] >= 2:
++                  h = -1
++                  K_ = Dm.shape[0]
++                  acc_b = torch.empty((Hc, Wc), dtype=Dm.dtype, device=dev)
++                  mxs_b = torch.empty((Hc, Wc), dtype=Dm.dtype, device=dev) if lmo_ else None
++                  bet_b = torch.empty((Hc, Wc), dtype=torch.bool, device=dev)
++                  af_b = torch.empty((Hc, Wc), dtype=torch.float32, device=dev) if vcon_ else None
++                  # same shifts as the flat loop: float64 product, round-half-even (Python round on np.float64 = np.rint)
++                  dts_ = np.asarray(dts, dtype=np.float64)[:K_]
++                  SXs = np.rint(np.asarray(VX, np.float64)[:, None] * dts_[None, :]).astype(np.int64).tolist()
++                  SYs = np.rint(np.asarray(VY, np.float64)[:, None] * dts_[None, :]).astype(np.int64).tolist()
++                  for h in range(len(VX)):
++                      if (h & 63) == 0 and time.time() - T0 > search_deadline:
++                          break
++                      sxh, syh = SXs[h], SYs[h]
++                      sls = [Dm[k_, P + syh[k_]:P + syh[k_] + Hc, P + sxh[k_]:P + sxh[k_] + Wc] for k_ in range(K_)]
++                      torch.add(sls[0], sls[1], out=acc_b)
++                      for k_ in range(2, K_):
++                          acc_b.add_(sls[k_])
++                      if lmo_:
++                          torch.maximum(sls[0], sls[1], out=mxs_b)
++                          for k_ in range(2, K_):
++                              torch.maximum(mxs_b, sls[k_], out=mxs_b)
++                          acc_b.sub_(mxs_b)
++                      if vcon_:
++                          af_b.copy_(acc_b); s1_ += af_b; s2_.addcmul_(af_b, af_b); nacc_ += 1
++                      torch.gt(acc_b, best, out=bet_b)
++                      torch.where(bet_b, acc_b, best, out=best)
++                      bidx.masked_fill_(bet_b, h)
++                      nhyp += 1
++                      nfa += K_
++                  del acc_b, mxs_b, bet_b, af_b
++                  VX_loop = ()
++              else:
++                  VX_loop = range(len(VX))
++              for h in VX_loop:
+                   if (h & 63) == 0 and time.time() - T0 > search_deadline:
+                       break
+                   acc = None

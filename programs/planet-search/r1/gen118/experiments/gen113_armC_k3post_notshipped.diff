@@ -1,0 +1,290 @@
+diff -ru -x NOTES.md -x experiments -x __pycache__ $RSI_SANDBOX/r1/gen113/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen113/workspace/submission/stackd/finder.py	2026-11-06 14:56:50
++++ submission/stackd/finder.py	2026-11-06 21:51:32
+@@ -1321,6 +1321,40 @@
+     except Exception:
+         RCLIP = 0.0
+ 
++    K3DMODE = os.environ.get("TNO_K3DISC", "0")
++    K3DISC = K3DMODE == "1"          # gen112 rule inside to_cands (pre-dedup)
++    K3POST = K3DMODE == "2"          # gen113 arm C: same gate applied after dedup, skipping duplicates of A/B tracks
++    K3DP = float(os.environ.get("TNO_K3DP", "0.3")); K3DSEP = float(os.environ.get("TNO_K3DSEP", "4.0"))
++    K3DZ = float(os.environ.get("TNO_K3DZ", "3.3")); K3DC = float(os.environ.get("TNO_K3DC", "2.5"))
++    K3DB = float(os.environ.get("TNO_K3DB", "1.0")); K3DLOG = os.environ.get("TNO_K3DLOG", "1") != "0"
++
++    def conc_states(S):
++        """S (K,6) -> conc (K,): median over covered nights of centre minus 5x5-ring mean of the night co-add S/N."""
++        u_ = orbit.predict_dirs_b(S, t_ep, t, obs); q_ = u_ @ TF0.T
++        ix_ = np.rint((q_[..., 0] / q_[..., 2] - x0) / PIX).astype(np.int64)
++        iy_ = np.rint((q_[..., 1] / q_[..., 2] - y0) / PIX).astype(np.int64)
++        PT_ = np.zeros(ix_.shape + (7, 7)); PC_ = np.zeros(ix_.shape + (7, 7), bool)
++        for dy_ in range(-3, 4):
++            for dx_ in range(-3, 4):
++                xx_ = ix_ + dx_; yy_ = iy_ + dy_
++                ok_ = (xx_ >= 0) & (xx_ < W) & (yy_ >= 0) & (yy_ < H)
++                lin_ = np.where(ok_, yy_ * W + xx_, 0) + np.arange(N)[None] * (H * W)
++                lt__ = torch.from_numpy(lin_.ravel()).to(dev)
++                PT_[..., dy_ + 3, dx_ + 3] = maps.reshape(-1)[lt__].float().reshape(lin_.shape).cpu().numpy()
++                PC_[..., dy_ + 3, dx_ + 3] = cov.reshape(-1)[lt__].cpu().numpy().reshape(lin_.shape) & ok_
++        PT_ = np.where(PC_, PT_, 0.0)
++        cs_ = []
++        for idx in nights_idx:
++            wn = wf[idx][None, :, None, None]
++            num = (PT_[:, idx] * wn).sum(1); den = (PC_[:, idx] * wn ** 2).sum(1)
++            cp = num / np.sqrt(np.maximum(den, 1e-9))
++            ring = np.concatenate([cp[:, 1:6, 1], cp[:, 1:6, 5], cp[:, 1, 2:5], cp[:, 5, 2:5]], 1).mean(1)
++            cs_.append(np.where(den[:, 3, 3] > 0, cp[:, 3, 3] - ring, np.nan))
++        with np.errstate(all="ignore"), warnings.catch_warnings():
++            warnings.simplefilter("ignore")
++            r_ = np.nanmedian(np.stack(cs_, 1), axis=1)
++        return np.where(np.isfinite(r_), r_, -9.0)
++
+     def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None):
+         out = []
+         ref_ = sc
+@@ -1355,6 +1389,23 @@
+         except Exception as ex:
+             log("rclip failed:", repr(ex)[:200])
+             zc_ = None
++        # gen 112 (arm C, TNO_K3DISC, default 0 = gen110): point-source check for fstk (kind 3) tracks.  conc = median
++        # over covered nights of (night co-add S/N at the predicted pixel - mean of the co-add on the 5x5 border ring).
++        # Real bodies are point sources (inj7d: C25 3.0, B21 4.9, A 3.7-5.1), while kind-3 junk at zc >= 2.5 sits on
++        # diffuse excess (median 1.9, 95 % 2.5).  Tracks with zc >= K3DZ and conc >= K3DC get zc += K3DB.
++        try:
++            if K3DISC and zc_ is not None:
++                jq_ = np.flatnonzero((kd == 3) & np.isfinite(zc_) & (zc_ >= K3DZ))
++                if len(jq_):
++                    cq_ = conc_states(np.asarray(S, float)[jq_])
++                    ok_ = cq_ >= K3DC
++                    zc_ = zc_.copy(); zc_[jq_[ok_]] += K3DB
++                    z_ = np.where(zc_ > z_, zc_, z_)
++                    if len(jq_) and K3DLOG:
++                        log(f"k3disc: {int(ok_.sum())} of {len(jq_)} kind-3 tracks with zc >= {K3DZ} boosted; "
++                            f"conc {np.round(np.sort(cq_)[::-1][:8], 2).tolist()}")
++        except Exception as ex:
++            log("k3disc failed:", repr(ex)[:200])
+         n3n = None
+         try:
+             if N3 > 0 and n3 is not None and kd is not None and len(n3) == len(S) and int((kd == 2).sum()) >= 30:
+@@ -1740,6 +1791,21 @@
+             os.makedirs(SDD_, exist_ok=True); vR_, cR_ = score_states(np.array(refined))
+             np.savez(os.path.join(SDD_, "refined_vc.npz"), v=vR_.astype(np.float32), c=cR_, wf=np.asarray(wf, np.float32),
+                      night=np.asarray(night), rsc=np.array(rsc), rkd=np.array(rkd), rng=np.array(rng_))
++            if os.environ.get("TNO_PATCH_DUMP", "0") == "1":   # gen 112 arm C diagnostic: 7x7 map patches per exposure
++                SP_ = np.array(refined); u_ = orbit.predict_dirs_b(SP_, t_ep, t, obs); q_ = u_ @ TF0.T
++                fx_ = (q_[..., 0] / q_[..., 2] - x0) / PIX; fy_ = (q_[..., 1] / q_[..., 2] - y0) / PIX
++                ix_ = np.rint(fx_).astype(np.int64); iy_ = np.rint(fy_).astype(np.int64)
++                PT_ = np.zeros(ix_.shape + (7, 7), np.float32); PC_ = np.zeros(ix_.shape + (7, 7), bool)
++                for dy_ in range(-3, 4):
++                    for dx_ in range(-3, 4):
++                        xx_ = ix_ + dx_; yy_ = iy_ + dy_
++                        ok_ = (xx_ >= 0) & (xx_ < W) & (yy_ >= 0) & (yy_ < H)
++                        lin_ = np.where(ok_, yy_ * W + xx_, 0) + np.arange(N)[None] * (H * W)
++                        lt__ = torch.from_numpy(lin_.ravel()).to(dev)
++                        PT_[..., dy_ + 3, dx_ + 3] = maps.reshape(-1)[lt__].float().reshape(lin_.shape).cpu().numpy()
++                        PC_[..., dy_ + 3, dx_ + 3] = cov.reshape(-1)[lt__].cpu().numpy().reshape(lin_.shape) & ok_
++                np.savez(os.path.join(SDD_, "patch.npz"), pt=PT_, pc=PC_, fx=(fx_ - ix_).astype(np.float32),
++                         fy=(fy_ - iy_).astype(np.float32))
+             sdump_("refined", [dict(epoch_mjd=float(t_ep), state=[float(x) for x in refined[i]], p=0.5,
+                                     sc=float(rsc[i]), ng=int(rng_[i]), kd=int(rkd[i]), j=int(order_[i]) if i < len(order_) else -1,
+                                     seed=[float(x) for x in states[order_[i]]] if i < len(order_) else None)
+@@ -1753,6 +1819,48 @@
+         sdump_("tocands", cands)
+         cands = dedup(cands, score_states, t_ep)
+         sdump_("dedup", cands)
++        # gen 113 (arm C, TNO_K3DISC=2): point-source gate for fstk (kind 3) tracks applied AFTER dedup.  A kind-3 track
++        # with clipped z >= K3DZ and conc >= K3DC gets zc += K3DB (rankx keys on max(key, zc)) and p re-derived from it,
++        # unless it shadows a candidate with p >= K3DP (within K3DSEP" on >= 2 nights), i.e. a duplicate of an A/B track.
++        if (K3POST or os.environ.get("TNO_K3LOGC", "0") == "1") and cands:
++            try:
++                jk_ = [i for i, c_ in enumerate(cands) if "zc" in c_]
++                if jk_:
++                    Sk_ = np.array([cands[i]["state"] for i in jk_], float)
++                    ck_ = conc_states(Sk_)
++                    for q_, i in enumerate(jk_):
++                        cands[i]["conc"] = float(ck_[q_])
++                    Sa_ = np.array([c_["state"] for c_ in cands], float)
++                    ua_ = orbit.predict_dirs_b(Sa_, t_ep, t, obs)
++                    nb_, nd_ = 0, 0
++                    for q_, i in enumerate(jk_):
++                        c_ = cands[i]
++                        if not (c_["zc"] >= K3DZ and ck_[q_] >= K3DC):
++                            continue
++                        oth_ = [k for k, o_ in enumerate(cands) if k != i and o_["p"] >= K3DP]
++                        dup_ = False
++                        if oth_:
++                            cs_ = np.clip((ua_[oth_] * ua_[i][None]).sum(-1), -1, 1)
++                            close_ = cs_ > math.cos(K3DSEP * ARCR)          # (M, N) exposures
++                            nn__ = np.array([len(set(night[np.flatnonzero(r_)].tolist())) for r_ in close_])
++                            dup_ = bool((nn__ >= 2).any())
++                        c_["k3g"] = 2 if dup_ else 1
++                        if dup_:
++                            nd_ += 1
++                            continue
++                        if K3POST:
++                            c_["zc"] = float(c_["zc"] + K3DB)
++                            pz_ = 1 / (1 + math.exp(min(60.0, max(-60.0, -(c_["zc"] - 4.5) / 0.8))))
++                            c_["p"] = float(min(max(c_["p"], pz_), 0.999))
++                            nb_ += 1
++                    cands = sorted(cands, key=lambda c_: -c_["p"])
++                    log(f"k3post: {len(jk_)} kind-3 in output, {nb_} boosted, {nd_} gated but dup of p>={K3DP}; "
++                        f"top conc {np.round(np.sort(ck_)[::-1][:8], 2).tolist()}")
++            except Exception as ex:
++                import traceback
++                traceback.print_exc()
++                log("k3post failed:", repr(ex)[:300])
++            sdump_("k3post", cands)
+ 
+         def n3boost(cs):   # gen 79: apply the n3 p path after any p reassignment (cv_rerank hands out sorted p values)
+             return [dict(c_, p=max(c_["p"], c_["pn"]), p0=c_["p"]) if "pn" in c_ else c_ for c_ in cs]
+diff -ru -x NOTES.md -x experiments -x __pycache__ $RSI_SANDBOX/r1/gen113/workspace/submission/stackd/fstk.py submission/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen113/workspace/submission/stackd/fstk.py	2026-11-06 14:56:50
++++ submission/stackd/fstk.py	2026-11-06 21:59:38
+@@ -38,6 +38,13 @@
+     RCLIP = float(os.environ.get("TNO_FSTK_RCLIP", "3.0"))
+     RPOOL = float(os.environ.get("TNO_FSTK_RPOOL", "1.0") or 1.0)
+     RSUB = int(os.environ.get("TNO_FSTK_RSUB", "2") or 2)       # sub-steps per half unit: grid -0.5..0.5 step 0.5/RSUB
++    # gen 111 (arm K): keep the top TOPK searched hypotheses at each pooled peak pixel (not only the argmax) and re-score
++    # each one; TKPOOL = pooled peaks before the re-score when TOPK > 1 (0: NPK*RPOOL); PKW = peak max-pool window.
++    TOPK = int(os.environ.get("TNO_FSTK_TOPK", "0") or 0)
++    TKPOOL = int(os.environ.get("TNO_FSTK_TKPOOL", "0") or 0)
++    PKW = int(os.environ.get("TNO_FSTK_PKW", "9") or 9) | 1
++    NMSR = float(os.environ.get("TNO_FSTK_NMSR", "3") or 3)    # TOPK row suppression radius (px) and velocity (dv)
++    NMSV = float(os.environ.get("TNO_FSTK_NMSV", "3") or 3)
+     if RS and DCLIP <= 0:
+         RS = False
+     probes = []
+@@ -227,11 +234,15 @@
+             # peaks
+             bs = best.reshape(Hc, WD)[:, :Wc].float() * qn
+             del best
+-            pk = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > PTH)
++            pk = (bs == F.max_pool2d(bs[None, None], PKW, 1, PKW // 2)[0, 0]) & (bs > PTH)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
+             nab = [int((sc > z_).sum()) for z_ in (5.0, 6.0, 7.0)]
+             NPK_ = int(NPK * RPOOL) if Dm3 is not None else NPK
++            TK_ = TOPK if (TOPK > 1 and Dm3 is not None) else 1
++            if TK_ > 1 and TKPOOL > 0:
++                NPK_ = TKPOOL
++            pk_all = (yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()) if probes else None
+             sc_full = sc if probes else None
+             if sc.numel() > NPK_:
+                 top = torch.topk(sc, NPK_).indices
+@@ -242,14 +253,31 @@
+                 pf_ = (yy * WD + xx).to(torch.int64)
+                 bv_ = torch.full((len(sc),), -1e9, device=dev); bi_ = torch.zeros(len(sc), dtype=torch.int64, device=dev)
+                 OFF_t = torch.tensor(OFF[:nh], dtype=torch.int64, device=dev)
++                if TK_ > 1:
++                    kk_ = min(TK_, nh)
++                    bv_ = torch.full((kk_, len(sc)), -1e9, device=dev); bi_ = torch.zeros((kk_, len(sc)), dtype=torch.int64, device=dev)
+                 for h0 in range(0, nh, 256):
+                     v_ = torch.zeros((min(256, nh - h0), len(sc)), device=dev)
+                     for k_ in range(K):
+                         v_ += Dq[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
++                    if TK_ > 1:
++                        ia_ = torch.arange(h0, h0 + v_.shape[0], device=dev, dtype=torch.int64)[:, None].expand(-1, len(sc))
++                        cv_ = torch.cat([bv_, v_], 0); ci_ = torch.cat([bi_, ia_], 0)
++                        bv_, j_ = torch.topk(cv_, bv_.shape[0], dim=0)
++                        bi_ = torch.gather(ci_, 0, j_)
++                        del cv_, ci_, ia_, j_
++                        continue
+                     m_, a_ = v_.max(0)
+                     bt_ = m_ > bv_
+                     bv_ = torch.where(bt_, m_, bv_); bi_ = torch.where(bt_, a_ + h0, bi_)
+-                hh = bi_.cpu().numpy()
++                if TK_ > 1:
++                    # expand: one candidate per (peak, hypothesis); candidate score = its own stack value
++                    kk_ = bv_.shape[0]
++                    hh = bi_.T.reshape(-1).cpu().numpy()
++                    sc = (bv_.T.reshape(-1) * qn)
++                    yy = yy[:, None].expand(-1, kk_).reshape(-1); xx = xx[:, None].expand(-1, kk_).reshape(-1)
++                else:
++                    hh = bi_.cpu().numpy()
+                 del OFF_t
+             yy, xx, sc = yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()
+             fi = fi0 + len(frames_out)
+@@ -263,14 +291,38 @@
+                     log("fstk rescore failed:", repr(ex)[:200]); rres = None
+             if rres is not None:
+                 s2_, ex_, ey_, evx_, evy_, s0_ = rres
+-                o2_ = np.argsort(-s2_)[:NPK]
++                o2_ = np.argsort(-s2_)
++                if TK_ > 1:
++                    # several hypotheses of one peak can re-score to the same state: keep one per (px, 0.5 dv) cell
++                    # greedy suppression: drop a candidate within NMSR px and NMSV dv of an already kept one
++                    seen_ = {}; keep_ = []
++                    for j in o2_:
++                        cx_ = xx[j] + ex_[j]; cy_ = yy[j] + ey_[j]
++                        cvx_ = VX[hh[j]] + evx_[j]; cvy_ = VY[hh[j]] + evy_[j]
++                        gx_, gy_ = int(cx_ // NMSR), int(cy_ // NMSR)
++                        dup_ = False
++                        for ox_ in (-1, 0, 1):
++                            for oy_ in (-1, 0, 1):
++                                for (qx_, qy_, qvx_, qvy_) in seen_.get((gx_ + ox_, gy_ + oy_), ()):
++                                    if (abs(qx_ - cx_) <= NMSR and abs(qy_ - cy_) <= NMSR
++                                            and abs(qvx_ - cvx_) <= NMSV * dv and abs(qvy_ - cvy_) <= NMSV * dv):
++                                        dup_ = True; break
++                                if dup_: break
++                            if dup_: break
++                        if dup_:
++                            continue
++                        seen_.setdefault((gx_, gy_), []).append((cx_, cy_, cvx_, cvy_)); keep_.append(j)
++                        if len(keep_) >= NPK:
++                            break
++                    o2_ = np.array(keep_, np.int64)
++                o2_ = o2_[:NPK]
+                 log(f"fstk rescore d={d:.2f} ({time.time() - t_rs0:.1f}s): {len(sc)} peaks, clip{RCLIP} exact max {s0_.max():.2f}, local max {s2_.max():.2f}, "
+                     f"median lift {np.median(s2_ - s0_):.2f}, kept {len(o2_)}, "
+                     f"overlap with old top {len(set(o2_.tolist()) & set(range(min(NPK, len(sc)))))}")
+                 for j in o2_:
+                     px = (xx[j] + ex_[j] + P - (WD - 1) / 2) * SP; py = (yy[j] + ey_[j] + P - (HD - 1) / 2) * SP
+                     rows_out.append((float(s2_[j]), d, (VX[hh[j]] + evx_[j]) * SP, (VY[hh[j]] + evy_[j]) * SP, px, py, fi))
+-                s2sorted = np.sort(s2_)[::-1][:NPK]
++                s2sorted = np.sort(s2_[o2_])[::-1]
+                 if probes:
+                     kx_ = xx[o2_] + ex_[o2_]; ky_ = yy[o2_] + ey_[o2_]; ks_ = s2_[o2_]
+                     kvx_ = VX[hh[o2_]] + evx_[o2_]; kvy_ = VY[hh[o2_]] + evy_[o2_]
+@@ -332,6 +384,32 @@
+                                        f" krank {int((ks_ > ks_[jn_]).sum())}")
+                                 rsv = rsv + (f", RESCORE clip{RCLIP} exact {r_[5][0]:.2f} local {r_[0][0]:.2f} truth-cont {r1_[5][0]:.2f} "
+                                        f"rank {rk2} slice-rescored max {s2sorted.max():.2f} 10th {s2sorted[min(9, len(s2sorted) - 1)]:.2f}")
++                            if rres is not None and TK_ > 1:
++                                # nearest candidate (any peak x hypothesis that was re-scored) to the truth
++                                cx_ = xx.astype(float); cy_ = yy.astype(float)
++                                dpx_ = np.hypot(cx_ - (ppx / SP + (WD - 1) / 2 - P), cy_ - (ppy / SP + (HD - 1) / 2 - P))
++                                ddv_ = np.hypot(VX[hh] - pvx, VY[hh] - pvy) / dv
++                                cm_ = np.where((dpx_ <= 1.5) & (ddv_ <= 1.5))[0]
++                                if len(cm_):
++                                    jb_ = cm_[np.argmax(s2_[cm_])]
++                                    rsv += (f", TOPK cand near truth: {len(cm_)}, best re-scored {s2_[jb_]:.2f} "
++                                            f"(rank {int((s2sorted > s2_[jb_]).sum())}), kept {jb_ in set(o2_.tolist())}")
++                                else:
++                                    jn2_ = int(np.argmin(dpx_ + ddv_))
++                                    rsv += f", TOPK no cand near truth (nearest {dpx_[jn2_]:.1f}px {ddv_[jn2_]:.1f}dv)"
++                            if pk_all is not None:
++                                pyy_, pxx_, psc_ = pk_all
++                                dpk_ = np.hypot(pxx_ - (ppx / SP + (WD - 1) / 2 - P), pyy_ - (ppy / SP + (HD - 1) / 2 - P))
++                                jp_ = int(np.argmin(dpk_)) if len(dpk_) else -1
++                                if jp_ >= 0:
++                                    rsv += f", nearest pk {dpk_[jp_]:.1f}px s {psc_[jp_]:.2f} prank {int((psc_ > psc_[jp_]).sum())}"
++                            bl = float(bs[yi - 2:yi + 3, xi - 2:xi + 3].max())
++                            for w_ in (3, 5, 9):
++                                pw_ = (bs == F.max_pool2d(bs[None, None], w_, 1, w_ // 2)[0, 0])
++                                txi_ = int(round(ppx / SP + (WD - 1) / 2 - P)); tyi_ = int(round(ppy / SP + (HD - 1) / 2 - P))
++                                loc_ = pw_[tyi_ - 1:tyi_ + 2, txi_ - 1:txi_ + 2] & (bs[tyi_ - 1:tyi_ + 2, txi_ - 1:txi_ + 2] >= bl - 0.3)
++                                nab_ = int(((bs > bl) & pw_ & (bs > PTH)).sum())
++                                rsv += f", pkw{w_} truth-is-peak {bool(loc_.any())} rank {nab_}"
+                         except Exception as ex:
+                             rsv = f", rescore probe failed {repr(ex)[:80]}"
+                     bl = float(bs[yi - 2:yi + 3, xi - 2:xi + 3].max())
+@@ -353,6 +431,9 @@
+             Dm = None; Dm3 = None
+         except Exception as ex:
+             log(f"fstk failed at d={d:.1f}:", repr(ex)[:300])
++            if os.environ.get("TNO_FSTK_TB", "0") == "1":
++                import traceback
++                traceback.print_exc()
+             Dm = None; Dm3 = None
+             try:
+                 if dev == "cuda":

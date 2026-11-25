@@ -1,0 +1,108 @@
+--- $RSI_SANDBOX/r1/gen082/workspace/submission/stackd/finder.py	2026-11-05 01:00:50
++++ $RSI_SANDBOX/r1/gen082/tmp/armA/stackd/finder.py	2026-11-05 02:42:53
+@@ -1530,14 +1530,24 @@
+         def n3boost(cs):   # gen 79: apply the n3 p path after any p reassignment (cv_rerank hands out sorted p values)
+             return [dict(c_, p=max(c_["p"], c_["pn"]), p0=c_["p"]) if "pn" in c_ else c_ for c_ in cs]
+         write_out(a.out, n3boost(cands))
++        RANKX = os.environ.get("TNO_RANKX", "1") != "0"   # gen 82: robust per-night consistency rerank (see rankx below)
++        CVZ = {} if RANKX else None
+         if CV:
+             try:
+-                cands = cv_rerank(cands, R, np.array(rkd), np.array(rsc), cem, score_states, total, t, night, nights_u, budget, T0, log)
++                cands = cv_rerank(cands, R, np.array(rkd), np.array(rsc), cem, score_states, total, t, night, nights_u, budget, T0, log, zout=CVZ)
+                 write_out(a.out, n3boost(cands))
+             except Exception as ex:
+                 import traceback
+                 traceback.print_exc()
+                 log("cv rerank failed:", repr(ex)[:300])
++        if RANKX and len(cands) >= 2 and time.time() - T0 < budget * float(os.environ.get("TNO_RANKX_DL", "0.985")):
++            try:
++                cands = rankx(cands, R, np.array(rkd), np.array(rsc), score_states, wf, nights_idx, CVZ, log)
++                write_out(a.out, n3boost(cands))
++            except Exception as ex:
++                import traceback
++                traceback.print_exc()
++                log("rankx failed:", repr(ex)[:300])
+         if N3 > 0:
+             cands = n3boost(cands)
+             log(f"n3 boosts: {sum(c_.get('p0', c_['p']) < c_['p'] for c_ in cands)} of {len(cands)} candidates")
+@@ -2084,7 +2094,68 @@
+     return keep
+ 
+ 
+-def cv_rerank(cands, R, rkd, rsc, cem, score_states, total, t, night, nights_u, budget, T0, log_):
++def rankx(cands, R, rkd, rsc, score_states, wf, nights_idx, cvz, log_):
++    """gen 82 (TNO_RANKX, default on; 0 = gen081): robust consistency rerank.  Along each candidate's track the
++    per-exposure S/N values are re-stacked with (1) the single brightest exposure removed and then (2) each night left
++    out in turn; the statistic is the MINIMUM over nights of that leave-one-night-out weighted stack S/N.  A real body
++    (flux on every night) loses ~sqrt((M-1)/M); junk carried by one outlier exposure/night (static residual, cosmic,
++    CEM-overfit noise spike) collapses.  It is converted to a z against the SAME unsupervised null as to_cands /
++    cv_rerank (refined window seeds, kind 2) and blended 50/50 with the existing z (cv blend where cv_rerank evaluated
++    the candidate, else the all-exposure z).  Re-ORDER only: candidates keep the scenario's sorted p values."""
++    W_ = float(os.environ.get("TNO_RANKX_W", "0.5"))
++    nm_ = (rkd == 2) if (rkd == 2).sum() >= 30 else (rkd >= 2)
++    if nm_.sum() < 30:
++        log_("rankx: null too small; skipped")
++        return cands
++    Sc = np.array([c["state"] for c in cands], float)
++    nul = R[nm_]
++    nul = nul[np.random.default_rng(11).permutation(len(nul))[:400]]
++    wf2 = wf ** 2
++
++    def rob(S):
++        v, c = score_states(S)
++        v = np.where(c, v, -np.inf)
++        jm = np.argmax(v, 1)
++        v = np.where(c, v, 0.0).astype(np.float64)
++        c = c.copy()
++        ar = np.arange(len(v))
++        v[ar, jm] = 0.0; c[ar, jm] = False
++        num = v * wf[None]; den = c * wf2[None]
++        Nt = num.sum(1); Dt = den.sum(1)
++        lono = np.full(len(v), np.inf); ncov = np.zeros(len(v), int); npos = np.zeros(len(v), int)
++        for idx in nights_idx:
++            cv_ = c[:, idx].any(1)
++            nk = num[:, idx].sum(1); dk = den[:, idx].sum(1)
++            lo_ = (Nt - nk) / np.sqrt(np.maximum(Dt - dk, 1e-3))
++            lono = np.where(cv_, np.minimum(lono, lo_), lono)
++            ncov += cv_; npos += cv_ & (nk > 0)
++        lono = np.where(ncov >= 2, lono, -9.0)
++        return lono, ncov, npos
++
++    ln, _, _ = rob(nul)
++    lc, nc_, np_ = rob(Sc)
++    mx, sx = np.median(ln), 1.4826 * np.median(np.abs(ln - np.median(ln))) + 1e-3
++    zx = (lc - mx) / sx
++    tn = rsc[nm_]
++    mt, st = np.median(tn), 1.4826 * np.median(np.abs(tn - np.median(tn))) + 1e-3
++    v0, c0 = score_states(Sc)
++    wtot = (v0 * wf[None]).sum(1) / np.sqrt(np.maximum((c0 * wf2[None]).sum(1), 1e-3))
++    zp = np.array([cvz.get(id(c), (wtot[j] - mt) / st) if cvz is not None else (wtot[j] - mt) / st
++                   for j, c in enumerate(cands)])
++    key = W_ * zx + (1 - W_) * zp
++    pv = sorted([float(c["p"]) for c in cands], reverse=True)
++    old = [int(j) for j in np.argsort([-c["p"] for c in cands], kind="stable")]
++    new = [int(j) for j in np.argsort(-key, kind="stable")]
++    out = [dict(cands[j], p=pv[k]) for k, j in enumerate(new)]
++    rk_old = {j: k for k, j in enumerate(old)}
++    mv = [rk_old[j] for j in new[:25]]
++    log_(f"rankx: null lono median {mx:.2f} MAD {sx:.2f} (n {len(ln)}); {len(cands)} reordered, "
++         f"{sum(1 for r_ in mv if r_ >= 25)} of new top-25 came from old rank >= 25 (old ranks {sorted(mv)}); "
++         f"cv z for {sum(1 for c in cands if cvz is not None and id(c) in cvz)}")
++    return out
++
++
++def cv_rerank(cands, R, rkd, rsc, cem, score_states, total, t, night, nights_u, budget, T0, log_, zout=None):
+     """gen 34: two-fold cross-validated stack S/N.  Exposures are split into halves A/B, alternating in time order
+     inside every night (so both halves span all nights and the orbit fit does not extrapolate).  The state is
+     re-fitted (CEM from the candidate state, full sigmas) on A only and its S/N measured on B, and vice versa;
+@@ -2156,6 +2227,9 @@
+     pv = sorted([float(cands[j]["p"]) for j in E], reverse=True)
+     Enew = sorted(E, key=lambda j: -zs[j])
+     out = [dict(cands[j], p=pv[k]) for k, j in enumerate(Enew)] + [cands[j] for j in order[done:]]
++    if zout is not None:                  # gen 82 (TNO_RANKX): hand the blended cv z to rankx, keyed by output dict id
++        for k, j in enumerate(Enew):
++            zout[id(out[k])] = float(zs[j])
+     log_(f"cv rerank: null cv median {mn:.2f} MAD {sn:.2f} (n {len(cvn)}), tot median {mt:.2f} MAD {st:.2f}; "
+          f"{done}/{len(cands)} candidates evaluated in {time.time() - t0:.1f}s; top p "
+          f"{[round(c['p'], 3) for c in sorted(out, key=lambda c: -c['p'])[:8]]}")

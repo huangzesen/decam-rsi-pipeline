@@ -1,0 +1,24 @@
+--- history/gen143/submission/stackd/finder.py	2026-11-08 17:44:28
++++ submission/stackd/finder.py	2026-11-09 02:27:12
+@@ -1280,6 +1280,21 @@
+     if wf_:
+         tw_ = time.time()
+         wdl_ = budget * float(os.environ.get("TNO_SEEDS_WAITF", "0.80"))
++        # gen 146 (TNO_NS_WAIT, default 1; 0 = gen143): if the linker is not done yet, compute the night seeds NOW
++        # (same call, same deadline rule as the late path below) instead of idling, so the GPU's wait for the CPU-bound
++        # linker is used and the post-marker time goes to refinement.
++        if (ns_pre is None and not os.path.exists(wf_) and os.environ.get("TNO_NIGHTSEED", "1") != "0"
++                and os.environ.get("TNO_NS_WAIT", "1") != "0"):
++            try:
++                NSN_ = int(os.environ.get("TNO_NS_N", "0") or 0) or (8000 if cuda else 1500)
++                ns_dl_ = min(budget * float(os.environ.get("TNO_NS_DL", "0.80")),
++                             (time.time() - T0) + float(os.environ.get("TNO_NS_DLF", "0.15")) * budget)
++                ns_pre = night_seeds(torch, F, dev, maps, cov, wf, t, night, obs, TF0, x0, y0, PIX, W, H,
++                                     ns_dl_, NSN_, log)
++                log(f"conc: night seeds during linker wait: {len(ns_pre[0])} rows, {time.time() - T0:.0f}s elapsed")
++            except Exception as ex:
++                log("wait-time night seeds failed:", ex)
++                ns_pre = None
+         while not os.path.exists(wf_) and time.time() - T0 < wdl_:
+             time.sleep(0.5)
+         log(f"conc: waited {time.time() - tw_:.0f}s for linker seeds ({'ready' if os.path.exists(wf_) else 'NOT ready'})")

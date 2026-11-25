@@ -1,0 +1,166 @@
+diff -ru -x * $RSI_SANDBOX/r1/gen106/workspace/submission/stackd/finder.py armA/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen106/workspace/submission/stackd/finder.py	2026-11-06 07:28:37
++++ armA/stackd/finder.py	2026-11-06 08:33:37
+@@ -563,7 +563,7 @@
+             import fstk as fstk_
+             dl_ = min(search_deadline, (time.time() - T0) + float(os.environ.get("TNO_FSTK_F", "0.20")) * budget)
+             fr_rows, fr_frames = fstk_.fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0,
+-                                                    pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit)
++                                                    pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit, cov=cov)
+             if fr_frames:
+                 best_all.extend(fr_rows); FST_ROWS = list(fr_rows)
+                 frames.extend(fr_frames); wi_of.extend([FSTK_WI] * len(fr_frames))
+diff -ru -x * $RSI_SANDBOX/r1/gen106/workspace/submission/stackd/fstk.py armA/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen106/workspace/submission/stackd/fstk.py	2026-11-06 07:28:37
++++ armA/stackd/fstk.py	2026-11-06 08:34:02
+@@ -17,8 +17,16 @@
+ 
+ 
+ def fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0, pole, GM, tframe, T0,
+-                deadline, log, fi0, C_AU=173.1446, orbit=None):
++                deadline, log, fi0, C_AU=173.1446, orbit=None, cov=None):
+     rows_out, frames_out = [], []
++    # gen 106 (arm A): TNO_FRS=1 keeps a much larger peak pool per distance (TNO_FRS_POOL) and re-scores every kept
++    # hypothesis on the 1" maps (exact per-exposure track positions, small position/velocity sub-grid), robustly
++    # (leave-max-night-out, >= FRS_NPOS nights with positive flux); only the best NPK re-scored rows go on as seeds.
++    FRS = os.environ.get("TNO_FRS", "1") == "1"
++    FRS_POOL = int(os.environ.get("TNO_FRS_POOL", "3000"))
++    FRS_NPOS = int(os.environ.get("TNO_FRS_NPOS", "3"))
++    FRS_PEN = float(os.environ.get("TNO_FRS_PEN", "3.0"))
++    frs_st = [0, 0.0, 0]
+     DMIN = float(os.environ.get("TNO_FSTK_DMIN", "30")); DMAX = float(os.environ.get("TNO_FSTK_DMAX", "70"))
+     VLO = float(os.environ.get("TNO_FSTK_VLO", "0.85")); VHI = float(os.environ.get("TNO_FSTK_VHI", "1.12"))
+     ANG = math.radians(float(os.environ.get("TNO_FSTK_ANG", "25")))
+@@ -207,8 +215,9 @@
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
+             nab = [int((sc > z_).sum()) for z_ in (5.0, 6.0, 7.0)]
+-            if sc.numel() > NPK:
+-                top = torch.topk(sc, NPK).indices
++            npk_ = max(NPK, FRS_POOL) if FRS else NPK
++            if sc.numel() > npk_:
++                top = torch.topk(sc, npk_).indices
+                 yy, xx, sc = yy[top], xx[top], sc[top]
+             # best hypothesis at each kept peak: re-evaluate every searched hypothesis there (gather)
+             hh = np.zeros(len(sc), np.int64)
+@@ -227,9 +236,31 @@
+                 del OFF_t
+             yy, xx, sc = yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()
+             fi = fi0 + len(frames_out)
++            pxa = (xx + P - (WD - 1) / 2) * SP; pya = (yy + P - (HD - 1) / 2) * SP
++            vxa = VX[hh] * SP if len(sc) else np.zeros(0); vya = VY[hh] * SP if len(sc) else np.zeros(0)
++            sc_o = sc
++            frs_pool = None
++            if FRS and len(sc) > NPK and time.time() - T0 < deadline:
++                try:
++                    t_r0 = time.time()
++                    sc_n, pxa, pya, vxa, vya = frs_rescore(torch, dev, maps, cov, d, TD, obs, ts - tref, wsel if DW else None,
++                                                           gid_, K, TF0_t, x0, y0, PIX, SP, dv, pxa, pya, vxa, vya,
++                                                           FRS_NPOS, FRS_PEN)
++                    o_r = np.argsort(-sc_n)[:NPK]; frs_pool = sc_n
++                    frs_st[0] += 1; frs_st[1] += time.time() - t_r0; frs_st[2] += len(sc)
++                    if di < 3 or (di % 10) == 0:
++                        log(f"fstk frs d={d:.2f}: {len(sc)} -> {len(o_r)} rows in {time.time() - t_r0:.2f}s, new top "
++                            f"{np.round(sc_n[o_r[:3]], 2).tolist()} cut {float(sc_n[o_r[-1]]):.2f}; kept ranks of old top-300: "
++                            f"{int((o_r < NPK).sum())}")
++                    sc, pxa, pya, vxa, vya = sc_n[o_r], pxa[o_r], pya[o_r], vxa[o_r], vya[o_r]
++                except Exception as ex:
++                    log("fstk frs failed:", repr(ex)[:300])
++                    sc = sc_o
++            if len(sc) > NPK and len(sc) == len(sc_o):
++                o_r = np.argsort(-sc)[:NPK]
++                sc, pxa, pya, vxa, vya = sc[o_r], pxa[o_r], pya[o_r], vxa[o_r], vya[o_r]
+             for j in range(len(sc)):
+-                px = (xx[j] + P - (WD - 1) / 2) * SP; py = (yy[j] + P - (HD - 1) / 2) * SP
+-                rows_out.append((float(sc[j]), d, VX[hh[j]] * SP, VY[hh[j]] * SP, px, py, fi))
++                rows_out.append((float(sc[j]), d, float(vxa[j]), float(vya[j]), float(pxa[j]), float(pya[j]), fi))
+             frames_out.append((TD, tref, oref))
+             # diagnostics: probe states (stack at the probe's nearest hypothesis +-1 velocity step, 3x3 px; best-map max)
+             for pr in probes:
+@@ -270,6 +301,12 @@
+                     inprior = (VLO * vcs <= math.hypot(pvx, pvy) <= VHI * vcs) and \
+                         abs(math.atan2(pvx * vcy - pvy * vcx, pvx * vcx + pvy * vcy)) <= ANG
+                     pstat.append((pr.get("tag", "?"), d, bestv, bl, rk))
++                    if frs_pool is not None:
++                        fs_ = frs_rescore(torch, dev, maps, cov, d, TD, obs, ts - tref, wsel if DW else None, gid_, K, TF0_t,
++                                          x0, y0, PIX, SP, dv, np.array([ppx]), np.array([ppy]), np.array([pvx * SP]),
++                                          np.array([pvy * SP]), FRS_NPOS, FRS_PEN)[0][0]
++                        log(f"fstk frs probe {pr.get('tag', '?')}: d={d:.2f} frs score {fs_:.2f}, rank in pool "
++                            f"{int((frs_pool > fs_).sum())}/{len(frs_pool)}, kept cut {float(sc[-1]) if len(sc) else 0:.2f}")
+                     log(f"fstk probe {pr.get('tag', '?')}: d={d:.2f} (r {rp:.2f}), |v|/vc {math.hypot(pvx, pvy) / vcs:.3f}, "
+                         f"in prior {inprior}, exact-hyp local max {bestv:.2f}, best-map 5x5 max {bl:.2f}, "
+                         f"rank among kept peaks {rk}, map max {float(sc.max()) if len(sc) else 0:.2f}")
+@@ -290,6 +327,73 @@
+                 pass
+             break
+     del smaps
++    if FRS:
++        log(f"fstk frs: {frs_st[0]} distances re-scored, {frs_st[2]} hypotheses, {frs_st[1]:.1f}s")
+     log(f"fstk done: {ntot} hypotheses, kernel {tconv:.1f}s ({ntot / max(tconv, 1e-6):.0f} hyp/s), {len(rows_out)} rows, "
+         f"{time.time() - t_all0:.1f}s total")
+     return rows_out, frames_out
++
++
++def frs_rescore(torch, dev, maps, cov, d, TD, obs, dts, wsel, gid, K, TF0_t, x0, y0, PIX, SP, dv, px, py, vx, vy,
++                npos_min=3, pen=3.0, chunk=1024):
++    """gen 106 (arm A): robust re-score of fstk hypotheses on the 1" maps.  For each hypothesis (d-frame position px,py
++    at tref and velocity vx,vy, SP units) a 3x3 position (+-0.5 SP) x 3x3 velocity (+-0.5 dv SP) sub-grid is evaluated at
++    the exact per-exposure predicted pixel (nearest); per-night weighted sums give score = leave-max-night-out weighted
++    S/N, minus pen if fewer than npos_min nights have positive flux.  Returns (score, px, py, vx, vy) of the best
++    sub-grid point per hypothesis."""
++    N, H, W = maps.shape
++    chunk = max(32, min(chunk, int(3e6 / (81 * max(N, 1)))))
++    f32 = torch.float32
++    TDt = torch.tensor(np.asarray(TD), dtype=f32, device=dev)
++    ob = torch.tensor(np.asarray(obs, float), dtype=f32, device=dev)        # (N,3)
++    dt_ = torch.tensor(np.asarray(dts, float), dtype=f32, device=dev)       # (N,)
++    w_ = torch.ones(N, dtype=f32, device=dev) if wsel is None else torch.tensor(np.asarray(wsel, float), dtype=f32, device=dev)
++    G = torch.zeros((N, K), dtype=f32, device=dev)
++    G[torch.arange(N, device=dev), torch.tensor(np.asarray(gid), dtype=torch.int64, device=dev)] = 1.0
++    o3 = torch.tensor([-0.5, 0.0, 0.5], dtype=f32, device=dev)
++    dpx = (o3[:, None, None, None] * SP).expand(3, 3, 3, 3).reshape(-1)
++    dpy = (o3[None, :, None, None] * SP).expand(3, 3, 3, 3).reshape(-1)
++    dvx = (o3[None, None, :, None] * dv * SP).expand(3, 3, 3, 3).reshape(-1)
++    dvy = (o3[None, None, None, :] * dv * SP).expand(3, 3, 3, 3).reshape(-1)
++    mflat = maps.reshape(-1)
++    cflat = cov.reshape(-1) if cov is not None else None
++    nb = torch.arange(N, device=dev, dtype=torch.int64) * (H * W)
++    out_s, out_c = [], []
++    for j0 in range(0, len(px), chunk):
++        sl = slice(j0, j0 + chunk)
++        P_ = lambda a: torch.tensor(np.asarray(a[sl], float), dtype=f32, device=dev)
++        PX = P_(px)[:, None] + dpx[None]; PY = P_(py)[:, None] + dpy[None]         # (B,C)
++        VXt = P_(vx)[:, None] + dvx[None]; VYt = P_(vy)[:, None] + dvy[None]
++        gx = PX[..., None] + VXt[..., None] * dt_; gy = PY[..., None] + VYt[..., None] * dt_   # (B,C,N)
++        Wd = TDt[2] + gx[..., None] * TDt[0] + gy[..., None] * TDt[1]
++        Wd = Wd / torch.linalg.norm(Wd, dim=-1, keepdim=True)
++        X = d * Wd - ob
++        q = X @ TF0_t.T
++        ix = torch.round((q[..., 0] / q[..., 2] - x0) / PIX).to(torch.int64)
++        iy = torch.round((q[..., 1] / q[..., 2] - y0) / PIX).to(torch.int64)
++        del Wd, X, q, gx, gy
++        ok = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
++        lin = torch.where(ok, iy * W + ix, torch.zeros_like(ix)) + nb
++        v = mflat[lin].float()
++        c = ok if cflat is None else (ok & cflat[lin])
++        if cflat is None:
++            c = c & (v != 0)
++        cf = c.float()
++        v = v * cf
++        Sn = (v * w_) @ G                       # (B,C,K)
++        Wn = (cf * w_ * w_) @ G
++        zn = torch.where(Wn > 0, Sn / torch.sqrt(Wn.clamp(min=1e-6)), torch.full_like(Sn, -1e9))
++        im = zn.argmax(-1, keepdim=True)
++        St = Sn.sum(-1) - Sn.gather(-1, im)[..., 0]
++        Wt = Wn.sum(-1) - Wn.gather(-1, im)[..., 0]
++        s = St / torch.sqrt(Wt.clamp(min=1e-3))
++        npos = ((Wn > 0) & (Sn > 0)).sum(-1)
++        s = torch.where(npos >= npos_min, s, s - pen)
++        bs, bi = s.max(1)
++        out_s.append(bs); out_c.append(bi)
++        del v, c, cf, Sn, Wn, zn, lin, ix, iy, ok
++    sc = torch.cat(out_s).cpu().numpy().astype(float)
++    bi = torch.cat(out_c).cpu().numpy()
++    dpx, dpy, dvx, dvy = (a.cpu().numpy().astype(float) for a in (dpx, dpy, dvx, dvy))
++    return (sc, np.asarray(px, float) + dpx[bi], np.asarray(py, float) + dpy[bi],
++            np.asarray(vx, float) + dvx[bi], np.asarray(vy, float) + dvy[bi])

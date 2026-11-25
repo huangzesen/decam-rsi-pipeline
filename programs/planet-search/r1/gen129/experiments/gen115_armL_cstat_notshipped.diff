@@ -1,0 +1,142 @@
+diff -ru -x __pycache__ $RSI_SANDBOX/r1/gen115/workspace/submission/stackd/fstk.py $RSI_SANDBOX/r1/gen115/tmp/armL/submission/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen115/workspace/submission/stackd/fstk.py	2026-11-06 23:48:46
++++ $RSI_SANDBOX/r1/gen115/tmp/armL/submission/stackd/fstk.py	2026-11-07 01:43:32
+@@ -40,6 +40,15 @@
+     RSUB = int(os.environ.get("TNO_FSTK_RSUB", "2") or 2)       # sub-steps per half unit: grid -0.5..0.5 step 0.5/RSUB
+     if RS and DCLIP <= 0:
+         RS = False
++    # gen 115 (arm L): per-co-add search statistic (TNO_FSTK_CST): 0 = shipped (sum of depth-weighted frame-clipped
++    # co-adds); mad = co-adds normalised by their robust (MAD) noise, depth-weighted; cclip = same, clipped at +-CCLIP
++    # at the co-add level; llr = mixture log-likelihood ratio per co-add (signal LSIG total, outlier fraction LEPS).
++    # FCLIP = frame-level clip of the search co-adds (default = TNO_FSTK_CLIP).  RCST = same choice for the re-score.
++    CST = os.environ.get("TNO_FSTK_CST", "0")
++    RCST = os.environ.get("TNO_FSTK_RCST", "0")
++    FCLIP = float(os.environ.get("TNO_FSTK_FCLIP", str(DCLIP)) or DCLIP)
++    if DCLIP <= 0:
++        CST = RCST = "0"; FCLIP = DCLIP
+     probes = []
+     try:
+         pf = os.environ.get("TNO_FSTK_PROBE")    # diagnostic only: json list of {state, epoch_mjd, tag}
+@@ -58,7 +67,8 @@
+     for i_ in range(0, N, 4):
+         a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
+         if DCLIP > 0:
+-            a_ = a_.clamp_(-max(DCLIP, RCLIP) if RS else -DCLIP, max(DCLIP, RCLIP) if RS else DCLIP)
++            cl_ = max(DCLIP, FCLIP, RCLIP) if RS else max(DCLIP, FCLIP)
++            a_ = a_.clamp_(-cl_, cl_)
+         sm_.append(a_.half())
+     smaps = torch.cat(sm_, 0); del sm_
+     H2, W2 = smaps.shape[1:]
+@@ -148,8 +158,13 @@
+                     del Wd, X, q, sx, sy, ux, uy, grid
+                 fr_ = torch.cat(rows_, 0)
+                 if Dm3 is not None:
+-                    Dm3[int(gid_[k_])] += (fr_ * float(wsel[k_])) if DW else fr_
+-                    fr_ = fr_.clamp(-DCLIP, DCLIP)
++                    rc_ = max(DCLIP, RCLIP)
++                    fr3_ = fr_.clamp(-rc_, rc_) if FCLIP > rc_ else fr_
++                    Dm3[int(gid_[k_])] += (fr3_ * float(wsel[k_])) if DW else fr3_
++                    del fr3_
++                    fr_ = fr_.clamp(-FCLIP, FCLIP)
++                elif FCLIP != DCLIP:
++                    fr_ = fr_.clamp(-FCLIP, FCLIP)
+                 if DW:
+                     fr_ *= float(wsel[k_])
+                 Dm[int(gid_[k_])] += fr_
+@@ -167,6 +182,15 @@
+                         m_ = float(torch.median(v_))
+                         Dm3[k_] = torch.where(Dm3[k_] != 0, Dm3[k_] - m_, Dm3[k_])
+                     del v_
++            norm_s = norm; norm_r = norm
++            if CST != "0" or RCST != "0":
++                Wk_ = np.zeros(K)
++                for k_ in range(N):
++                    Wk_[int(gid_[k_])] += float(wsel[k_]) ** 2 if DW else 1.0
++                if CST != "0":
++                    norm_s = _cstat(torch, Dm, CST, Wk_, log if di == 0 else None, "search")
++                if RCST != "0" and Dm3 is not None:
++                    norm_r = _cstat(torch, Dm3, RCST, Wk_, log if di == 0 else None, "rescore")
+             t_warp = time.time() - t_d0
+             # velocity grid (search px / day) inside the prior, ordered by closeness to prograde circular
+             vc = np.cross(pole, w0); vc = vc / np.linalg.norm(vc) * math.sqrt(GM / d)
+@@ -194,9 +218,9 @@
+             use8 = I8 and qs >= 1.5
+             if use8:
+                 Dq = torch.round(Dm.float().mul_(qs)).to(torch.int8).reshape(K, -1)
+-                qn = norm / qs
++                qn = norm_s / qs
+             else:
+-                Dq = Dm.reshape(K, -1); qn = norm
++                Dq = Dm.reshape(K, -1); qn = norm_s
+             del Dm; Dm = None
+             L = Hc * WD
+             best = torch.full((L,), -127 if use8 else -1e4, dtype=Dq.dtype, device=dev)
+@@ -259,7 +283,7 @@
+             if Dm3 is not None and len(sc):
+                 try:
+                     rres = _rescore(torch, dev, Dm3, xx.astype(float), yy.astype(float), VX[hh], VY[hh], dts_c, P, WD, HD,
+-                                    norm, dv, RSUB)
++                                    norm_r, dv, RSUB)
+                 except Exception as ex:
+                     log("fstk rescore failed:", repr(ex)[:200]); rres = None
+             if rres is not None:
+@@ -321,10 +345,10 @@
+                     if Dm3 is not None and bh_ is not None:
+                         try:
+                             r_ = _rescore(torch, dev, Dm3, np.array([bh_[0]], float), np.array([bh_[1]], float),
+-                                          np.array([bh_[2]]), np.array([bh_[3]]), dts_c, P, WD, HD, norm, dv, RSUB)
++                                          np.array([bh_[2]]), np.array([bh_[3]]), dts_c, P, WD, HD, norm_r, dv, RSUB)
+                             # also a continuous-truth evaluation (true sub-px position & velocity, no search)
+                             r1_ = _rescore(torch, dev, Dm3, np.array([ppx / SP + (WD - 1) / 2 - P]), np.array([ppy / SP + (HD - 1) / 2 - P]),
+-                                           np.array([pvx]), np.array([pvy]), dts_c, P, WD, HD, norm, dv, 0)
++                                           np.array([pvx]), np.array([pvy]), dts_c, P, WD, HD, norm_r, dv, 0)
+                             if rres is not None:
+                                 rk2 = int((s2sorted > r_[0][0]).sum())
+                                 dd_ = np.hypot(kx_ - bh_[0], ky_ - bh_[1])
+@@ -369,6 +393,46 @@
+     log(f"fstk done: {ntot} hypotheses, kernel {tconv:.1f}s ({ntot / max(tconv, 1e-6):.0f} hyp/s), {len(rows_out)} rows, "
+         f"{time.time() - t_all0:.1f}s total")
+     return rows_out, frames_out
++
++
++def _cstat(torch, D, mode, Wk, log=None, what=""):
++    """gen 115 (arm L): transform the (median-subtracted) co-adds D (K, H, W) in place into per-co-add score terms
++    whose plain sum is the stack score (returns the norm to apply: 1.0).  Uncovered pixels (exact 0) stay 0.
++    z_k = D_k / (1.4826 MAD_k) on covered px; a_k = sqrt(W_k / sum W) (depth share of a body's S/N^2);
++    mad: a_k z_k;  cclip: a_k clip(z_k, +-CCLIP);  llr: [g_k(z_k) + mu_k^2/2] / S, mu_k = S a_k,
++    g_k(z) = log((1-e) N(z - mu_k) + e U) - log((1-e) N(z) + e U)  (linear mu z - mu^2/2 in the core, bounded)."""
++    K = D.shape[0]
++    a = np.sqrt(np.asarray(Wk, float) / max(float(np.sum(Wk)), 1e-12))
++    CC = float(os.environ.get("TNO_FSTK_CCLIP", "3.0"))
++    S = float(os.environ.get("TNO_FSTK_LSIG", "6.0"))
++    e = float(os.environ.get("TNO_FSTK_LEPS", "0.01"))
++    U = float(os.environ.get("TNO_FSTK_LU", "0.05"))
++    sig = []
++    for k in range(K):
++        v_ = D[k, ::3, ::3].float(); v_ = v_[v_ != 0]
++        s_ = float(1.4826 * torch.median(v_.abs())) if v_.numel() > 100 else 1.0
++        s_ = s_ if s_ > 1e-6 else 1.0
++        sig.append(s_)
++        del v_
++        for y0 in range(0, D.shape[1], 2048):
++            x = D[k, y0:y0 + 2048].float()
++            cov = x != 0
++            z = x / s_
++            if mode == "mad":
++                h = a[k] * z
++            elif mode == "cclip":
++                h = a[k] * z.clamp(-CC, CC)
++            else:
++                mu = S * a[k]
++                c0 = math.log(1 - e) - 0.5 * math.log(2 * math.pi)
++                l1 = torch.logaddexp(c0 - 0.5 * (z - mu) ** 2, torch.full_like(z, math.log(e * U)))
++                l0 = torch.logaddexp(c0 - 0.5 * z ** 2, torch.full_like(z, math.log(e * U)))
++                h = (l1 - l0 + 0.5 * mu * mu) / S
++            D[k, y0:y0 + 2048] = torch.where(cov, h, torch.zeros_like(h)).to(D.dtype)
++            del x, cov, z, h
++    if log is not None:
++        log(f"fstk cstat {what} {mode}: co-add MAD sigma {['%.2f' % s for s in sig]}, depth share a {['%.2f' % x for x in a]}")
++    return 1.0
+ 
+ 
+ def _rescore(torch, dev, Dm3, xx, yy, vx, vy, dts_c, P, WD, HD, norm, dv, RSUB):

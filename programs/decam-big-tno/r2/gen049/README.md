@@ -1,0 +1,1 @@
+Run `python3 finder.py --scen DIR --out OUT --budget-s 1800` with a DECam region catalogue. The finder writes ranked linkages using original detection row numbers to `OUT/candidates.json`. See `NOTES.md` for validation measurements.

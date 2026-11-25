@@ -1,0 +1,46 @@
+--- workspace/submission/linker/stack.py	2026-11-06 07:28:37
++++ tmp/armV/submission/linker/stack.py	2026-11-06 12:34:35
+@@ -172,6 +172,9 @@
+     hits = []
+     ZT = float(os.environ.get("TNO_STACK_ZT", 6.8))   # z over the other nights' exposures; null max ~6.1 (scen02, 30 gammas)
+     ZA = 6.0
++    VPAIR = os.environ.get("TNO_VPAIR", "0") == "1"      # gen 108 arm V, default off
++    VSN = float(os.environ.get("TNO_VPAIR_SN", "6.0"))
++    VZ = float(os.environ.get("TNO_VPAIR_Z", "2.5"))
+     NGMAX = int(os.environ.get("TNO_STACK_NG", 100000))
+     REJ = {}
+     ng = 0
+@@ -237,6 +240,12 @@
+                 for a_, b_ in NS.values():
+                     npos += ((a_ / torch.sqrt(torch.clamp(b_, min=1.0))) > 1.5).float()
+                 sel = (z >= ZT) & (npos >= min(2, len(NS))) & (npos >= 1) & (zall >= ZA)
++                if VPAIR:
++                    # gen 108 arm V: two bright single detections (both S/N >= VSN) on two nights, weak support
++                    # (z >= VZ over the other nights' exposures) -> weight-4 "bright on 1-2 nights" bodies
++                    T_smin = torch.tensor(np.minimum(sn[seeds[i]], sn[seeds[j]]), dtype=torch.float32, device=dev)
++                    vsel = (T_smin >= VSN) & (z >= VZ) & (z < ZT) & (npos >= 1)
++                    sel = sel | vsel
+                 if bool(sel.any()):
+                     w = torch.nonzero(sel)[:, 0].cpu().numpy()
+                     zz = zall[sel].cpu().numpy(); zo = z[sel].cpu().numpy()
+@@ -301,13 +310,20 @@
+         mz = L["emz"]
+         mags = [mz[E[x]] - 2.5 * math.log10(D[x, 4]) for x in (a, b) if np.isfinite(mz[E[x]]) and D[x, 4] > 0]
+         out.append(dict(state=st, z=h[8], zall=zv, npos=h[6], nother=h[7], sn2=(float(sn[a]), float(sn[b])), r=r,
++                        vpair=bool(h[8] < ZT),
+                         mag=float(np.median(mags)) if mags else None))
+     log("stack rejects", REJ, "hits used", n_h)
+     log(f"stack: {len(out)} candidates; top z {[round(c['z'], 1) for c in out[:10]]}")
++    if VPAIR:
++        log(f"stack VPAIR: {sum(1 for h in hits if h[8] < ZT)} raw V hits, {sum(1 for c in out if c.get('vpair'))} V candidates kept")
+     return out
+ 
+ 
+ def p_stack(c):
+     """Modest confidence: below the linker's confirmed bodies, above its 3-point junk only for strong stacks."""
++    if c.get("vpair"):
++        # gen 108 arm V: conservative; ordered by the other nights' z, capped by TNO_VPAIR_P (default 0.05)
++        vp = float(os.environ.get("TNO_VPAIR_P", "0.05"))
++        return float(vp / (1 + math.exp(-2.0 * (c["z"] - 4.0))))
+     z = c["z"] + 0.2 * (c["npos"] - 2)
+     return float(0.6 / (1 + math.exp(-2.0 * (z - 7.6))))

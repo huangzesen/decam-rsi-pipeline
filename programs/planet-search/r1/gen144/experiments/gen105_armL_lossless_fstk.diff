@@ -1,0 +1,183 @@
+Binary files ../g104/stackd/__pycache__/fastfits.cpython-312.pyc and stackd/__pycache__/fastfits.cpython-312.pyc differ
+Binary files ../g104/stackd/__pycache__/fstk.cpython-312.pyc and stackd/__pycache__/fstk.cpython-312.pyc differ
+Binary files ../g104/stackd/__pycache__/mapper.cpython-312.pyc and stackd/__pycache__/mapper.cpython-312.pyc differ
+Binary files ../g104/stackd/__pycache__/orbit.cpython-312.pyc and stackd/__pycache__/orbit.cpython-312.pyc differ
+diff -ru ../g104/stackd/finder.py stackd/finder.py
+--- ../g104/stackd/finder.py	2026-11-06 06:46:18
++++ stackd/finder.py	2026-11-06 06:51:26
+@@ -298,6 +298,12 @@
+         o_t = np.argsort(t)
+         tbin = np.empty(len(t), int)
+         tbin[o_t] = np.r_[0, np.cumsum(np.diff(t[o_t]) > 0.06)]
++    # gen 105 (arm L, TNO_FSTK_LL=1): fstk gets its own less lossy 2" maps (built below, before the [-3,5] clamp), whose
++    # static mask per frame ignores the frame's OWN time bin (a mover lights its own bin; gen104 arm C TNO_STOTH).
++    FLL = os.environ.get("TNO_FSTK", "1") == "1" and os.environ.get("TNO_FSTK_LL", "1") == "1"
++    bin_lit = {}
++    ncv_ = None
++    FOWN = os.environ.get("TNO_FSTK_LOWN", "0") == "1"   # own-bin static mask for the fstk maps (measured worse, off)
+     for u_ in np.unique(tbin):
+         idx = np.flatnonzero(tbin == u_)
+         b = torch.zeros((H, W), dtype=torch.bool, device=dev)
+@@ -305,6 +311,13 @@
+             b |= maps[n] > 4
+         b = F.max_pool2d(b[None, None].half(), 3, 1, 1)[0, 0] > 0
+         nn += b.to(torch.int16)
++        if FLL and FOWN:
++            bc_ = torch.zeros((H, W), dtype=torch.bool, device=dev)
++            for n in idx:
++                bc_ |= cov[n]
++            bin_lit[int(u_)] = (b, bc_)
++            ncv_ = bc_.to(torch.int16) if ncv_ is None else ncv_ + bc_.to(torch.int16)
++            del bc_
+     # gen 20: TNO_SNEED (default 2 = old).  3 (with >= 4 bins) keeps faint movers from being zeroed by one noise
+     # excursion in another bin, but measured no gain on the injected test (A 11/15 vs 12/15, B 0 either way).
+     nbin_ = len(np.unique(tbin))
+@@ -452,6 +465,57 @@
+             del Tm, Vm
+         except Exception as ex:
+             log("template failed, skipped:", repr(ex)[:200])
++    FSM = None
++    if FLL:
++        # gen 105 (arm L): lossless-er fstk maps.  Per frame: static mask excluding the frame's own bin, no +5 clamp
++        # (winsor [-FLO, FHI], default -3/+8), 2x2 MEAN pool (max-pool biased noise up and cut a C body's stack S/N),
++        # robust renormalisation so pooled noise has unit sigma.  Uncovered/masked px stay exactly 0.
++        try:
++            t_ll = time.time()
++            FLO = float(os.environ.get("TNO_FSTK_LLO", "3")); FHI = float(os.environ.get("TNO_FSTK_LHI", "5"))
++            FLP = os.environ.get("TNO_FSTK_LPOOL", "max")
++            FSM = torch.zeros((N, H // 2, W // 2), dtype=torch.float16, device=dev)
++            zf_ = 0.0; sg_ = []
++            for n in range(N):
++                if len(bin_lit) == nbin_ and FOWN:
++                    # lit in >= SNEED OTHER bins, or (lit in >= 1 other bin and in >= half the other COVERED bins):
++                    # the second clause keeps stars in regions covered by only 2-3 bins masked (measured: without it
++                    # the own-bin rule unmasks them and fstk noise peaks > 7 grow from ~5 to thousands per slice)
++                    bl_, bc_ = bin_lit[int(tbin[n])]
++                    oth_ = nn - bl_.to(torch.int16)
++                    ocv_ = ncv_ - bc_.to(torch.int16)
++                    st_n = (oth_ >= SNEED) | ((oth_ >= 1) & (2 * oth_ >= ocv_))
++                    del oth_, ocv_
++                else:
++                    st_n = static
++                ok_ = cov[n] & ~st_n
++                zf_ += float(st_n.float().mean())
++                m_ = torch.where(ok_, maps[n].float().clamp(-FLO, FHI), torch.zeros((), device=dev))
++                cnt_ = F.avg_pool2d(ok_.float()[None, None], 2, 2)[0, 0]
++                good_ = cnt_ >= 0.49
++                if FLP == "max":
++                    num_ = F.max_pool2d(torch.where(ok_, m_, torch.full_like(m_, -1e4))[None, None], 2, 2)[0, 0]
++                    p_ = torch.where(good_, num_, torch.zeros_like(num_))
++                else:
++                    num_ = F.avg_pool2d(m_[None, None], 2, 2)[0, 0]
++                    p_ = torch.where(good_, num_ / cnt_.clamp(min=0.25), torch.zeros_like(num_))
++                del m_
++                s_ = p_[::5, ::5][good_[::5, ::5]]
++                if s_.numel() > 1000:
++                    md_ = torch.median(s_); sd_ = 1.4826 * torch.median(torch.abs(s_ - md_))
++                    sd_ = float(sd_) if float(sd_) > 1e-3 else 1.0
++                    p_ = torch.where(good_, ((p_ - md_) / sd_).clamp(-FLO - 1, FHI), torch.zeros_like(p_))
++                    sg_.append(sd_)
++                else:
++                    p_ = torch.zeros_like(p_)
++                FSM[n] = p_.half()
++                del num_, cnt_, good_, p_, ok_, st_n
++            log(f"fstk-LL maps: own-bin static fraction {zf_ / max(N, 1):.4f} (global {float(static.float().mean()):.4f}), "
++                f"pooled sigma before renorm {np.median(sg_) if sg_ else 0:.3f}, clip [-{FLO:g},{FHI:g}], pool {FLP}, {time.time() - t_ll:.1f}s")
++        except Exception as ex:
++            log("fstk-LL maps failed, fstk uses the old maps:", repr(ex)[:200])
++            FSM = None
++    bin_lit = None; ncv_ = None
+     maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
+     del nn, static
+     write_out(a.out, [])
+@@ -563,7 +627,9 @@
+             import fstk as fstk_
+             dl_ = min(search_deadline, (time.time() - T0) + float(os.environ.get("TNO_FSTK_F", "0.25")) * budget)
+             fr_rows, fr_frames = fstk_.fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0,
+-                                                    pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit)
++                                                    pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit,
++                                                    smaps_in=FSM)
++            FSM = None
+             if fr_frames:
+                 best_all.extend(fr_rows); FST_ROWS = list(fr_rows)
+                 frames.extend(fr_frames); wi_of.extend([FSTK_WI] * len(fr_frames))
+@@ -574,6 +640,7 @@
+                     nhyp = max(nhyp, 1)
+         except Exception as ex:
+             log("fstk failed:", repr(ex)[:300])
++        FSM = None
+         try:
+             if dev == "cuda":
+                 torch.cuda.empty_cache()
+diff -ru ../g104/stackd/fstk.py stackd/fstk.py
+--- ../g104/stackd/fstk.py	2026-11-06 06:46:18
++++ stackd/fstk.py	2026-11-06 07:06:49
+@@ -17,7 +17,7 @@
+ 
+ 
+ def fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0, pole, GM, tframe, T0,
+-                deadline, log, fi0, C_AU=173.1446, orbit=None):
++                deadline, log, fi0, C_AU=173.1446, orbit=None, smaps_in=None):
+     rows_out, frames_out = [], []
+     DMIN = float(os.environ.get("TNO_FSTK_DMIN", "30")); DMAX = float(os.environ.get("TNO_FSTK_DMAX", "70"))
+     VLO = float(os.environ.get("TNO_FSTK_VLO", "0.85")); VHI = float(os.environ.get("TNO_FSTK_VHI", "1.12"))
+@@ -45,13 +45,19 @@
+     dv = 1.0 / mdt
+     oref = obs[sel].mean(0)
+     # 2" pooled, winsorized maps
+-    sm_ = []
+-    for i_ in range(0, N, 4):
+-        a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
+-        if DCLIP > 0:
+-            a_ = a_.clamp_(-DCLIP, DCLIP)
+-        sm_.append(a_.half())
+-    smaps = torch.cat(sm_, 0); del sm_
++    LL = smaps_in is not None
++    if LL:
++        # gen 105 (arm L): mean-pooled, unit-sigma, mildly winsorized maps built by finder.py (TNO_FSTK_LL)
++        smaps = smaps_in
++    else:
++        sm_ = []
++        for i_ in range(0, N, 4):
++            a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
++            if DCLIP > 0:
++                a_ = a_.clamp_(-DCLIP, DCLIP)
++            sm_.append(a_.half())
++        smaps = torch.cat(sm_, 0); del sm_
++    CQ = float(os.environ.get("TNO_FSTK_CQ", "7"))   # LL: per-co-add winsor (units of co-add sigma) for the int8 scale
+     H2, W2 = smaps.shape[1:]
+     # distance grid (dgrid_deep step logic)
+     o = obs[sel]; tt = ts - tref
+@@ -88,7 +94,7 @@
+         dts_c[g_] = float((dts[mm_] * ww_).sum() / max(ww_.sum(), 1e-9))
+     K = len(grp_)
+     norm = 1.0 / math.sqrt(float((wsel ** 2).sum())) if DW else 1.0 / math.sqrt(N)
+-    log(f"fstk: {N} frames -> {K} co-adds, {len(dg)} distances {DMIN}-{DMAX} au, map {W2}x{H2}, "
++    log(f"fstk ({'LL renormalised maps' if LL else 'max-pooled maps'}): {N} frames -> {K} co-adds, {len(dg)} distances {DMIN}-{DMAX} au, map {W2}x{H2}, "
+         f"{deadline - (time.time() - T0):.0f}s")
+     ntot = 0; tconv = 0.0
+     pstat = []
+@@ -165,8 +171,21 @@
+             # (columns >= Wc are margin garbage, discarded).  Contiguous adds run ~4x faster than strided slices on MPS.
+             # Optional int8 (TNO_FSTK_I8, default 1): scale so the sum of the co-adds' max |value| fits in int8.
+             amax = [float(Dm[k_].abs().max()) for k_ in range(K)]
+-            qs = 127.0 / max(sum(amax), 1e-6)
+-            use8 = I8 and qs >= 1.5
++            if LL:
++                # each co-add has noise sigma sqrt(sum w^2 of its frames); winsorize at CQ sigma so the K-sum fits int8.
++                # Rounding noise (1/qs)/sqrt(12) stays a few % of the co-add sigma for K <= ~10.
++                for k_ in range(K):
++                    mm_ = grp_[k_]
++                    sk_ = math.sqrt(float((wsel[mm_] ** 2).sum())) if DW else math.sqrt(len(mm_))
++                    amax[k_] = min(amax[k_], CQ * sk_)
++                    Dm[k_].clamp_(-amax[k_], amax[k_])
++            if LL:
++                skmin_ = min(math.sqrt(float((wsel[mm_] ** 2).sum())) if DW else math.sqrt(len(mm_)) for mm_ in grp_)
++                qs = (127.0 - 0.5 * K) / max(sum(amax), 1e-6)     # rounding headroom: no int8 wrap
++                use8 = I8 and qs * skmin_ >= 1.0                  # step <= co-add sigma (rounding var <= 8 %)
++            else:
++                qs = 127.0 / max(sum(amax), 1e-6)
++                use8 = I8 and qs >= 1.5
+             if use8:
+                 Dq = torch.round(Dm.float().mul_(qs)).to(torch.int8).reshape(K, -1)
+                 qn = norm / qs

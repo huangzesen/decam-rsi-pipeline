@@ -1,0 +1,85 @@
+diff -ru -x e $RSI_SANDBOX/r1/gen141/workspace/submission/stackd/fstk.py armA/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen141/workspace/submission/stackd/fstk.py	2026-11-08 17:44:28
++++ armA/stackd/fstk.py	2026-11-08 18:45:27
+@@ -78,6 +78,11 @@
+     NATWN = int(float(os.environ.get("TNO_FSTK_NATWN", "15000" if _cu else "8000") or 0))
+     NATWC = int(float(os.environ.get("TNO_FSTK_NATWC", "15000" if _cu else "4000") or 0))
+     NATWX = int(float(os.environ.get("TNO_FSTK_NATWX", "3000" if _cu else "1500") or 0))
++    # gen 141 (TNO_FSTK_NATSEP, default 1; 0 = gen140): natwide's extra peaks no longer compete with gen139's pool for the
++    # NPK kept rows.  gen139's pool is blended (its own k) and its best NPK kept exactly as in gen139; natwide extras (same k)
++    # are added in separate slots only when their blended score beats that NPK-th kept score, at most NATSEPX per slice.
++    NATSEP = NATW and os.environ.get("TNO_FSTK_NATSEP", "1") != "0"
++    NATSEPX = int(float(os.environ.get("TNO_FSTK_NATSEPX", "100") or 0))
+     probes = []
+     PROBE_OLD = os.environ.get("TNO_FSTK_PROBE_OLD", "0") == "1"   # gen 127: 1 = gen126's (wrong at d != r) probe position
+     try:
+@@ -500,6 +505,7 @@
+                         if len(on_):
+                             if nat_mu[0] is None:
+                                 nat_mu[0] = _nat_med(torch, maps, NCLIP)
++                            n139_ = len(on_)
+                             if NATW:
+                                 try:
+                                     t_w0 = time.time()
+@@ -516,7 +522,19 @@
+                                 xx[on_] + ex_[on_], yy[on_] + ey_[on_], VX[hh[on_]] + evx_[on_], VY[hh[on_]] + evy_[on_],
+                                 dv, NCLIP, nat_mu[0])
+                             okn_ = np.isfinite(fs_) & (fs_ < 1e3)
+-                            if okn_.any():
++                            sep_ = None
++                            if NATSEP and okn_.any() and len(on_) > n139_:
++                                try:
++                                    sep_ = _natsep(fs_, fex_, fey_, fevx_, fevy_, okn_, s2_[on_], n139_, NPK, NATSEPX,
++                                                   os.environ.get("TNO_FSTK_NBLEND", "1") != "0")
++                                except Exception as exs:
++                                    log("fstk natsep failed:", repr(exs)[:200]); sep_ = None
++                            if sep_ is not None:
++                                fs_, fex_, fey_, fevx_, fevy_, o3_, nsx_, thr_ = sep_
++                                nat_ = (on_, fs_, fex_, fey_, fevx_, fevy_, o3_)
++                                log(f"fstk natsep d={d:.2f}: kept {len(o3_) - nsx_} of gen139 pool {n139_} + {nsx_} natwide extras "
++                                    f"(of {len(on_) - n139_}) above NPK-th {thr_:.2f}")
++                            elif okn_.any():
+                                 fsn_ = np.where(okn_, fs_, -1e9)
+                                 # gen 139 blend (TNO_FSTK_NBLEND, default 1): a peak keeps its clip-3 score (scaled to
+                                 # the native scale by the ratio of the two top-NPK medians) when that is higher, with its
+@@ -835,6 +853,40 @@
+         best[sl] = mx_.cpu().numpy(); arg[sl] = am_.cpu().numpy()
+         del acc
+     return best, EX[arg], EY[arg], EVX[arg], EVY[arg]
++
++
++def _natsep(fs_, fex_, fey_, fevx_, fevy_, okn_, s2o_, n0, NPK, NX, blend):
++    """gen 141 (TNO_FSTK_NATSEP): selection for a native pool = gen139 pool (first n0) + natwide extras.  The blend k is
++    computed on the gen139 pool alone (as in gen139), its best NPK are kept, and extras whose (blended) score beats the
++    NPK-th kept score (any valid extra if fewer than NPK were kept) take up to NX extra slots.  Returns the blended arrays,
++    the kept indices (into the pool), the number of extras kept and the threshold."""
++    fs_ = np.array(fs_, float); fex_ = np.array(fex_, float); fey_ = np.array(fey_, float)
++    fevx_ = np.array(fevx_, float); fevy_ = np.array(fevy_, float); okn_ = np.array(okn_, bool)
++    s2o_ = np.asarray(s2o_, float)
++    fsn_ = np.where(okn_, fs_, -1e9)
++    if blend:
++        a0 = fsn_[:n0][okn_[:n0]]
++        if len(a0) == 0:
++            return None
++        kk_ = float(np.median(np.sort(a0)[::-1][:NPK])) / max(float(np.median(np.sort(s2o_[:n0])[::-1][:NPK])), 1e-6)
++        kk_ = kk_ if (np.isfinite(kk_) and 0.5 < kk_ < 3.0) else 1.0
++        use2_ = (kk_ * s2o_ > fsn_) & (s2o_ > -1e8)
++        fs_ = np.where(use2_, kk_ * s2o_, fs_); okn_ = okn_ | use2_
++        fex_ = np.where(use2_, 0.0, fex_); fey_ = np.where(use2_, 0.0, fey_)
++        fevx_ = np.where(use2_, 0.0, fevx_); fevy_ = np.where(use2_, 0.0, fevy_)
++        fsn_ = np.where(okn_, fs_, -1e9)
++    oa = np.argsort(-fsn_[:n0])[:NPK]
++    oa = oa[okn_[oa]]
++    thr = float(fsn_[oa[-1]]) if len(oa) >= NPK else -1e8
++    ox = np.zeros(0, np.int64)
++    if NX > 0 and len(fsn_) > n0:
++        sx = fsn_[n0:]
++        ox = np.argsort(-sx)[:NX]
++        ox = ox[(sx[ox] > thr) & okn_[n0:][ox]] + n0
++    o3 = np.concatenate([oa.astype(np.int64), ox.astype(np.int64)])
++    if len(o3) == 0:
++        return None
++    return fs_, fex_, fey_, fevx_, fevy_, o3, len(ox), thr
+ 
+ 
+ def _natwide(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, ex_, ey_, evx_, evy_,

@@ -1,0 +1,105 @@
+--- history/gen143/submission/stackd/fstk.py	2026-11-08 20:43:58
++++ submission/stackd/fstk.py	2026-11-09 02:29:24
+@@ -97,6 +97,8 @@
+     # within +-0.25 canvas cell of the needed position instead of +-0.5.  Same per-cell noise distribution (2x2 max).
+     FINE = os.environ.get("TNO_FSTK_FINE", "0") == "1"
+     CCLIP = os.environ.get("TNO_FSTK_CCLIP", "0") != "0"   # gen 142: median-centre each 2" frame before the clip; measured WORSE on injection, OFF (= gen140)
++    LNORM = os.environ.get("TNO_FSTK_LNORM", "0") != "0"     # gen 146: CFAR-standardised coarse canvas for the peak pool
++    LNB = int(os.environ.get("TNO_FSTK_LNB", "24") or 24)
+     NMS = int(os.environ.get("TNO_FSTK_NMS", "9") or 9) | 1      # gen 142: peak non-maximum-suppression window (9 = gen140)
+     Q8MIN = float(os.environ.get("TNO_FSTK_Q8MIN", "1.0" if CCLIP and not FINE else "1.5"))   # int8 scale floor (1.5 = gen140)
+     FINE_MB = float(os.environ.get("TNO_FSTK_FINE_MB", "6000"))   # precompute the stride-1 maps only under this size
+@@ -457,18 +459,28 @@
+             # peaks
+             bs = best.reshape(Hc, WD)[:, :Wc].float() * qn
+             del best
+-            pk = (bs == F.max_pool2d(bs[None, None], NMS, 1, NMS // 2)[0, 0]) & (bs > PTH)
++            # gen 146 (TNO_FSTK_LNORM, default 0 = gen143): CFAR. Peaks are picked and the coarse pool is cut on a
++            # locally standardised canvas (block median / MAD, rescaled to the global ones), so star halos and
++            # low-coverage areas no longer set the pool; sc stays the raw canvas value for everything downstream.
++            zc = bs
++            if LNORM:
++                try:
++                    zc = _cfar(torch, F, bs, LNB)
++                except Exception as ex:
++                    log("fstk cfar failed:", repr(ex)[:160]); zc = bs
++            pk = (zc == F.max_pool2d(zc[None, None], NMS, 1, NMS // 2)[0, 0]) & (zc > PTH)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
++            sk = zc[yy, xx] if zc is not bs else sc
+             fin_ = torch.isfinite(sc) & (sc < 1e3)   # gen 115: drop NaN/overflow peaks
+             if not bool(fin_.all()):
+-                yy, xx, sc = yy[fin_], xx[fin_], sc[fin_]
++                yy, xx, sc, sk = yy[fin_], xx[fin_], sc[fin_], sk[fin_]
+             nab = [int((sc > z_).sum()) for z_ in (5.0, 6.0, 7.0)]
+             NPK_ = int(NPK * RPOOL) if Dm3 is not None else NPK
+-            sc_full = sc if probes else None
++            sc_full = sk if probes else None
+             if sc.numel() > NPK_:
+-                top = torch.topk(sc, NPK_).indices
+-                yy, xx, sc = yy[top], xx[top], sc[top]
++                top = torch.topk(sk, NPK_).indices
++                yy, xx, sc, sk = yy[top], xx[top], sc[top], sk[top]
+             # best hypothesis at each kept peak: re-evaluate every searched hypothesis there (gather)
+             hh = np.zeros(len(sc), np.int64)
+             if len(sc) and nh > 0:
+@@ -652,8 +664,8 @@
+                                        f"rank {rk2} slice-rescored max {s2sorted.max():.2f} 10th {s2sorted[min(9, len(s2sorted) - 1)]:.2f}")
+                         except Exception as ex:
+                             rsv = f", rescore probe failed {repr(ex)[:80]}"
+-                    bl = float(bs[yi - 2:yi + 3, xi - 2:xi + 3].max())
+-                    rk = int((sc > bl).sum()) if len(sc) else 0
++                    bl = float(zc[yi - 2:yi + 3, xi - 2:xi + 3].max())
++                    rk = int((sk > bl).sum()) if len(sk) else 0
+                     if sc_full is not None:
+                         rsv = f", full-list rank {int((sc_full > bl).sum())}/{sc_full.numel()}" + rsv
+                     inprior = (VLO * vcs <= math.hypot(pvx, pvy) <= VHI * vcs) and \
+@@ -668,7 +680,7 @@
+                 f"{'int8 q%.2f' % qs if use8 else 'fp16'}{tree_info}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
+                 f"peaks>5/6/7 {nab}, kept {len(sc)}; slice {di + 1}/{len(dg)} at {time.time() - T0:.0f}s of deadline {deadline:.0f}s; mx {mx} (old {mx_old})")
+             sl_t.append((time.time() - t_d0, t_warp, dtc, nh)); done_d.append(d)
+-            del Dq, bs, pk
++            del Dq, bs, pk; zc = None
+             Dm = None; Dm3 = None
+         except Exception as ex:
+             log(f"fstk failed at d={d:.1f}:", repr(ex)[:300])
+@@ -689,6 +701,39 @@
+     return rows_out, frames_out
+ 
+ 
++def _cfar(torch, F, bs, B):
++    """gen 146: locally standardised copy of the coarse canvas bs (H, W), uncovered (== 0) pixels left at 0.
++    Per B x B block: median and 1.4826 MAD of covered pixels (every 2nd column); blocks < 30 % covered use the
++    global values; local sigma >= 0.5 global.  z = (bs - med_loc) / sig_loc * sig_g + med_g (global scale kept)."""
++    H, W = bs.shape
++    Hp, Wp = -(-H // B) * B, -(-W // B) * B
++    x = F.pad(bs.float()[None, None], (0, Wp - W, 0, Hp - H))[0, 0]
++    nby, nbx = Hp // B, Wp // B
++    blk = x.reshape(nby, B, nbx, B).permute(0, 2, 1, 3).reshape(nby * nbx, B * B)[:, ::2]
++    cov = torch.isfinite(blk) & (blk != 0)
++    ncov = cov.sum(1)
++    big = torch.tensor(1e30, device=bs.device)
++    srt = torch.sort(torch.where(cov, blk, big), 1).values
++    mi = (ncov - 1).clamp(min=0) // 2
++    med = srt.gather(1, mi[:, None])[:, 0]
++    dev_ = torch.where(cov, (blk - med[:, None]).abs(), big)
++    sig = 1.4826 * torch.sort(dev_, 1).values.gather(1, mi[:, None])[:, 0]
++    v = bs[::3, ::3].float(); v = v[torch.isfinite(v) & (v != 0)]
++    if v.numel() < 100:
++        return bs
++    med_g = float(torch.median(v)); sig_g = max(1.4826 * float(torch.median((v - med_g).abs())), 1e-6)
++    if not (math.isfinite(med_g) and math.isfinite(sig_g)):
++        return bs
++    ok = ncov >= 0.3 * blk.shape[1]
++    med = torch.where(ok, med, torch.full_like(med, med_g))
++    sig = torch.where(ok, sig, torch.full_like(sig, sig_g)).clamp(min=0.5 * sig_g)
++    mg = F.interpolate(med.reshape(1, 1, nby, nbx), size=(Hp, Wp), mode="bilinear", align_corners=False)[0, 0, :H, :W]
++    sg = F.interpolate(sig.reshape(1, 1, nby, nbx), size=(Hp, Wp), mode="bilinear", align_corners=False)[0, 0, :H, :W]
++    bf = bs.float()
++    z = (bf - mg) / sg * sig_g + med_g
++    return torch.where(bf != 0, z, bf)
++
++
+ def _split(S, tc):
+     """gen 128: split a time-ordered co-add list in two contiguous parts minimising spreadA^2 + spreadB^2."""
+     bst = None

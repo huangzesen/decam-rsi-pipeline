@@ -1,0 +1,150 @@
+518a519,530
+>     # gen 80 (idea B, TNO_N3SEED, 0 = gen079): n3-scored window search.  Weight-2 bodies (S/N ~5 in >= 3 night
+>     # stacks) are not in the top total-sum peaks, so they never get seeded.  For every trial motion of a (non-deep)
+>     # window with >= 3 nights, also keep the per-night shifted co-add S/N (sum of that night's frames / sqrt(sum w^2)),
+>     # take its 3rd-best night per pixel (running top-3 sorting network, fp16) and keep the max over motions.  Peaks of
+>     # that map (z vs its own median/MAD) become EXTRA seeds (kind 3, outside the p null), interleaved with the window
+>     # seeds (1 per N3SEED_ILV window seeds), deduplicated against the selected window seeds.
+>     N3SEED = os.environ.get("TNO_N3SEED", "1") != "0"
+>     N3S_Z = float(os.environ.get("TNO_N3SEED_Z", "3.0"))
+>     N3S_PK = int(os.environ.get("TNO_N3SEED_PK", "0") or 0) or (300 if cuda else 120)
+>     N3S_ILV = max(1, int(os.environ.get("TNO_N3SEED_ILV", "2") or 2))
+>     best3_all = []         # same tuple layout as best_all, score = z of the 3rd-best night S/N
+>     fmdt = {}              # frame index -> half span (d) of its window (dedup)
+782a795,810
+>               # gen 80: n3 seed statistic (see N3SEED above); per-night frame groups of this window
+>               n3_ = False
+>               try:
+>                   if N3SEED and wi not in deep_ids and not vcon_ and Dm.shape[0] == len(sel):
+>                       nsel_ = night[sel]
+>                       ngrp_ = [np.flatnonzero(nsel_ == u_) for u_ in np.unique(nsel_)]
+>                       if len(ngrp_) >= 3:
+>                           wsq_ = np.asarray(wsel, float) ** 2 if DW else np.ones(len(sel))
+>                           nnrm_ = [1.0 / math.sqrt(max(float(wsq_[g_].sum()), 1e-9)) for g_ in ngrp_]
+>                           neg_ = torch.full((Hc, Wc), -1e4, dtype=torch.float16, device=dev)
+>                           b3_ = neg_.clone()
+>                           b3i_ = torch.zeros((Hc, Wc), dtype=torch.int32, device=dev)
+>                           n3_ = True
+>               except Exception as ex:
+>                   log("n3 seed setup failed:", repr(ex)[:200])
+>                   n3_ = False
+795c823,842
+<                   for k_ in range(Dm.shape[0]):
+---
+>                   if n3_:
+>                       # gen 80: same total stack (summed night by night) + running top-3 of per-night S/N
+>                       m1_ = neg_.clone(); m2_ = neg_.clone(); m3_ = neg_.clone()
+>                       for gi_, g_ in enumerate(ngrp_):
+>                           ng_ = None
+>                           for k_ in g_:
+>                               sx = int(round(VX[h] * dts[k_])); sy = int(round(VY[h] * dts[k_]))
+>                               sl = Dm[k_, P + sy:P + sy + Hc, P + sx:P + sx + Wc]
+>                               ng_ = sl.clone() if ng_ is None else ng_.add_(sl)
+>                           acc = ng_.clone() if acc is None else acc.add_(ng_)
+>                           ng_.mul_(nnrm_[gi_])
+>                           tmn_ = torch.minimum(m1_, ng_); torch.maximum(m1_, ng_, out=m1_)
+>                           tm2_ = torch.minimum(m2_, tmn_); torch.maximum(m2_, tmn_, out=m2_)
+>                           torch.maximum(m3_, tm2_, out=m3_)
+>                           del ng_, tmn_, tm2_
+>                       bt3_ = m3_ > b3_
+>                       b3_ = torch.where(bt3_, m3_, b3_)
+>                       b3i_ = torch.where(bt3_, torch.full_like(b3i_, h), b3i_)
+>                       del m1_, m2_, m3_, bt3_
+>                   for k_ in (range(Dm.shape[0]) if not n3_ else ()):
+862a910,935
+>               if n3_:
+>                   # gen 80: n3 seed peaks (z of the max-over-motions 3rd-best night S/N vs its covered-pixel median/MAD)
+>                   try:
+>                       b3f_ = b3_.float()
+>                       cv3_ = b3f_[::3, ::3]; cv3_ = cv3_[(cv3_ > -1e3) & (cv3_ != 0)]
+>                       if cv3_.numel() > 1000:
+>                           md3_ = torch.median(cv3_); sd3_ = 1.4826 * torch.median(torch.abs(cv3_ - md3_))
+>                           z3_ = torch.where(b3f_ > -1e3, (b3f_ - md3_) / torch.clamp(sd3_, min=1e-3),
+>                                             torch.full_like(b3f_, -1e4)).cpu()
+>                           pk3_ = (z3_ == F.max_pool2d(z3_[None, None], 9, 1, 4)[0, 0]) & (z3_ > N3S_Z)
+>                           y3_, x3_ = torch.nonzero(pk3_, as_tuple=True)
+>                           s3_ = z3_[y3_, x3_]
+>                           if s3_.numel() > N3S_PK:
+>                               tp3_ = torch.topk(s3_, N3S_PK).indices
+>                               y3_, x3_, s3_ = y3_[tp3_], x3_[tp3_], s3_[tp3_]
+>                           h3_ = b3i_.cpu()[y3_, x3_].numpy()
+>                           for j in range(len(s3_)):
+>                               px = (int(x3_[j]) + P - (WD - 1) / 2) * SP; py = (int(y3_[j]) + P - (HD - 1) / 2) * SP
+>                               best3_all.append((float(s3_[j]), d, VX[h3_[j]] * SP, VY[h3_[j]] * SP, px, py, len(frames)))
+>                           log(f"  n3 seeds d={d:.1f}: {len(s3_)} peaks, max z {float(s3_.max()) if len(s3_) else 0:.2f}, "
+>                               f"b3 median {float(md3_):.2f} mad {float(sd3_):.2f}")
+>                       del b3f_, cv3_
+>                   except Exception as ex:
+>                       log("n3 seed peaks failed:", repr(ex)[:200])
+>                   del b3_, b3i_, neg_
+>               fmdt[len(frames)] = mdt
+970a1044,1085
+>     n3sel = np.zeros(len(best_all), bool)
+>     if N3SEED and best3_all:
+>         # gen 80: extra n3 seeds: round-robin over windows, dedup vs selected window seeds (same d-frame, both
+>         # window ends within 3 search px), interleaved 1 per N3S_ILV window seeds; kind 3 (outside the p null)
+>         try:
+>             N3K = int(os.environ.get("TNO_N3SEED_K", "0") or 0) or max(50, NSEED // 5)
+>             wof3 = [wi_of[r[6]] for r in best3_all]
+>             rk3 = np.zeros(len(best3_all))
+>             for wv_ in set(wof3):
+>                 ii = sorted([j for j in range(len(best3_all)) if wof3[j] == wv_], key=lambda j: -best3_all[j][0])
+>                 for r_, j in enumerate(ii):
+>                     rk3[j] = r_
+>             o3 = sorted(range(len(best3_all)), key=lambda j: (rk3[j], -best3_all[j][0]))
+>             byf = {}
+>             for r in best_all:
+>                 byf.setdefault(r[6], []).append(r)
+>             ex3, ndup = [], 0
+>             for j in o3:
+>                 if len(ex3) >= N3K:
+>                     break
+>                 r3 = best3_all[j]; m_ = fmdt.get(r3[6], 0.5)
+>                 dup = False
+>                 for r in byf.get(r3[6], ()):
+>                     if (abs(r[4] - r3[4]) + m_ * abs(r[2] - r3[2]) < 3 * SP and
+>                             abs(r[5] - r3[5]) + m_ * abs(r[3] - r3[3]) < 3 * SP):
+>                         dup = True; break
+>                 if dup:
+>                     ndup += 1; continue
+>                 ex3.append(r3)
+>             mrg, fl_, i3 = [], [], 0
+>             for k_, r in enumerate(best_all):
+>                 mrg.append(r); fl_.append(False)
+>                 if (k_ + 1) % N3S_ILV == 0 and i3 < len(ex3):
+>                     mrg.append(ex3[i3]); fl_.append(True); i3 += 1
+>             while i3 < len(ex3):
+>                 mrg.append(ex3[i3]); fl_.append(True); i3 += 1
+>             best_all = mrg; n3sel = np.array(fl_, bool)
+>             log(f"n3 seeds: {len(ex3)} added (pool {len(best3_all)}, {ndup} dup of window seeds, cap {N3K}), "
+>                 f"top z {max(r[0] for r in ex3) if ex3 else 0:.2f}")
+>         except Exception as ex:
+>             log("n3 seed merge failed:", repr(ex)[:200])
+>             n3sel = np.zeros(len(best_all), bool)
+975a1091,1092
+>     if len(n3sel) == len(sdeep) and n3sel.any():
+>         sdeep = sdeep | n3sel          # gen 80: n3 seeds are kind 3 (outside the p null)
+998a1116
+>     n3arr = [x for x, f_ in zip(states, n3sel) if f_] if len(n3sel) == len(states) else []
+1237a1356,1364
+>     rn3s = []      # gen 80 diag: refined state came from an n3 seed
+>     try:
+>         sn3 = np.zeros(len(states), bool)
+>         if n3arr:
+>             # states were re-stacked (linker / night seeds prepended); n3 seeds are the matching window-seed rows
+>             nw_ = len(n3sel)
+>             sn3[len(states) - nw_:] = n3sel
+>     except Exception:
+>         sn3 = np.zeros(len(states), bool)
+1494a1622
+>         rn3s.append(bool(sn3[j]) if j < len(sn3) else False)
+1501a1630,1638
+>         try:
+>             # gen 80 diag: tag candidates refined from n3 seeds (extra key, ignored by the wrapper)
+>             if any(rn3s):
+>                 keys_ = set(tuple(float(x) for x in R[j_]) for j_ in range(len(R)) if rn3s[j_])
+>                 cands = [dict(c_, n3s=1) if tuple(c_["state"]) in keys_ else c_ for c_ in cands]
+>                 log(f"n3 seeds: {int(sum(rn3s))} refined, {sum(1 for c_ in cands if c_.get('n3s'))} in deduped cands "
+>                     f"(of {len(cands)})")
+>         except Exception as ex:
+>             log("n3 seed diag failed:", repr(ex)[:200])

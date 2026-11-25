@@ -1,0 +1,114 @@
+--- history/gen129/submission/stackd/finder.py	2026-11-08 00:47:16
++++ submission/stackd/finder.py	2026-11-08 04:18:45
+@@ -46,6 +46,16 @@
+ # from all of them has a lower median and every z (and p) rises (Mac inj7d: top stack p 0.85 -> 0.99).  The null is
+ # therefore the first NULL_FRAC of the refined kind-2 seeds in refinement order (~the sequential mode's count).
+ NULL_FRAC = float(os.environ.get("TNO_NULL_FRAC", "") or (0.35 if os.environ.get("TNO_SEEDS_WAIT") else 1.0))
++
++
++# gen 131 (TNO_NULL_N, default 160; 0 = gen130): hardware-invariant null size.  The null is the first NULL_FRAC of the
++# refined kind-2 seeds in refinement order, so its size (and how deep into the weaker seeds it reaches) grows with how
++# many seeds the machine refines before ref_deadline.  On the Mac (where every constant was tuned) gen129 refined ~450
++# kind-2 seeds (null ~140-160); gen130's batched CEM refines ~750 (null ~260) on the Mac and many more on the A100, where
++# the CUDA seed caps are ~12x larger.  A weaker null lowers the median, so every stack z and p rises (gen116: stack
++# p > 0.5 went 11 -> 23), which is the channel through which gen111/117/119 lost reward.  The cap keeps the null at the
++# STRONGEST NULL_N kind-2 seeds in refinement order whatever the machine's speed.
++NULL_N = int(float(os.environ.get("TNO_NULL_N", "160") or 0))
+ 
+ 
+ def k2null(kd):
+@@ -53,6 +63,8 @@
+     m = kd == 2
+     if NULL_FRAC < 1 and m.sum() >= 30:
+         n0 = max(30, int(round(NULL_FRAC * m.sum())))
++        if NULL_N > 0:
++            n0 = max(30, min(n0, NULL_N))
+         m = m & (np.cumsum(m) <= n0)
+     return m
+ 
+@@ -1666,6 +1678,45 @@
+             mu = Z[el].mean(0); sig = np.maximum(Z[el].std(0), sig * 0.3)
+         return bestS
+ 
++    # gen 130 (TNO_BCEM, default 1; 0 = gen129 per-seed loop): batched CEM.  The same algorithm as cem() (same sigmas,
++    # elites, sigma floor, Z[0] = mu, 6 iterations) run on a block of BS seeds at once, so each iteration does ONE
++    # predict/gather/sync for BS*K states instead of BS small ones.  CEM is CPU/launch-bound (numpy propagation + a GPU sync
++    # per call), and on CUDA (K=384, ~54k seed caps, seeds ready only at ~0.8 B) the per-seed loop is cut by ref_deadline,
++    # so a faster loop refines more seeds.  Results differ from the per-seed loop only through the RNG stream.
++    BCEM = os.environ.get("TNO_BCEM", "1") != "0"
++    BS = int(os.environ.get("TNO_BS", "0") or 0) or (48 if cuda else 16)
++    BS = max(1, min(BS, int(3_000_000 // max(K * max(N, 1), 1))))
++
++    def cem_b(S0, K_=K, iters=6):
++        B_ = len(S0)
++        r = np.linalg.norm(S0[:, :3], axis=1)
++        TL = np.stack([tframe(x[:3]) for x in S0])                     # (B,3,3)
++        base = np.array([1.5 * ARCR, 1.5 * ARCR, 0.6 * dv * SP, 0.6 * dv * SP, 0.03])
++        sig = base[None] * r[:, None]
++        mu = np.zeros((B_, 5))
++        bestS = S0.copy(); bestv = np.full(B_, -1e9)
++        ne = max(8, K_ // 16)
++        ar = np.arange(B_)
++        for itn in range(iters):
++            Z = mu[:, None] + rng.standard_normal((B_, K_, 5)) * sig[:, None]
++            Z[:, 0] = mu
++            S = np.repeat(S0[:, None], K_, 1)                            # (B,K,6)
++            S[..., :3] += Z[..., 0:1] * TL[:, None, 0] + Z[..., 1:2] * TL[:, None, 1]
++            los = S[..., :3] - oref; losn = los / np.linalg.norm(los, axis=-1, keepdims=True)
++            S[..., :3] += Z[..., 4:5] * losn
++            S[..., 3:] += Z[..., 2:3] * TL[:, None, 0] + Z[..., 3:4] * TL[:, None, 1]
++            v, c = score_states(S.reshape(-1, 6))
++            tot = total(v, c).reshape(B_, K_)
++            el = np.argsort(-tot, 1)[:, :ne]
++            t0_ = tot[ar, el[:, 0]]
++            upd = t0_ > bestv
++            if upd.any():
++                bestv = np.where(upd, t0_, bestv)
++                bestS[upd] = S[ar[upd], el[upd, 0]]
++            Ze = Z[ar[:, None], el]
++            mu = Ze.mean(1); sig = np.maximum(Ze.std(1), sig * 0.3)
++        return bestS
++
+     # gen 63: astrometric polish.  CEM maximises the summed S/N on 1" clamped maps with a 1.5" position sigma, so on long
+     # arcs a found body's state can sit several arcsec off on one night (injection: an S/N 12 body at rank 23 was 5.5" off
+     # on its first night, 0.4-1.1" on the other two -> not a hit).  For the top candidates: centroid the S/N peak within
+@@ -1885,9 +1936,29 @@
+         log(f"polish: {nimp} of {len(order_p)} states replaced ({nfix} moved > 2\" somewhere; {nwk_[0]} weak-night stack points) in {time.time() - tp0:.1f}s")
+         return out_
+ 
+-    for jj, j in enumerate(order_):
++    t_ref0 = time.time()
++    nwr_ = 0
++    for b0 in (range(0, len(order_), BS) if BCEM else ()):
+         if time.time() - T0 > ref_deadline:
+             break
++        idx_ = order_[b0:b0 + BS]
++        bS_ = cem_b(np.array(states[idx_], float))
++        v, c = score_states(bS_)
++        tt_ = total(v, c); ng_ = nights_good(v, c); n3_ = night3(v, c)
++        tq_ = total(np.minimum(v, RCLIP), c) if RCLIP > 0 else np.zeros(len(idx_))
++        for q_, j in enumerate(idx_):
++            refined.append(bS_[q_]); rsc.append(tt_[q_]); rng_.append(ng_[q_]); rkd.append(skind[j])
++            rsrc2.append(SRC2[0][0] <= j < SRC2[0][1])
++            rn3.append(float(n3_[q_]))
++            rscq.append(float(tq_[q_]) if RCLIP > 0 else 0.0)
++        if len(refined) // 50 > nwr_:
++            nwr_ = len(refined) // 50
++            R = np.array(refined)
++            write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3),
++                                            scq=np.array(rscq) if RCLIP > 0 else None), score_states, t_ep))
++    for jj, j in enumerate(() if BCEM else order_):
++        if time.time() - T0 > ref_deadline:
++            break
+         bestS = cem(states[j].copy())
+         v, c = score_states(bestS[None])
+         refined.append(bestS); rsc.append(total(v, c)[0]); rng_.append(nights_good(v, c)[0]); rkd.append(skind[j])
+@@ -1898,6 +1969,8 @@
+             R = np.array(refined)
+             write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3),
+                                             scq=np.array(rscq) if RCLIP > 0 else None), score_states, t_ep))
++    log(f"refinement ({'batched BS=' + str(BS) if BCEM else 'per-seed'}): {len(refined)} of {len(order_)} seeds in "
++        f"{time.time() - t_ref0:.1f}s, {time.time() - T0:.0f}s elapsed (ref_deadline {ref_deadline:.0f}s)")
+     try:
+         nref_ = len(refined)
+         if rbgseed_moved is not None:

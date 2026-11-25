@@ -1,0 +1,834 @@
+<meta name="dash-one-writer">
+<style>
+.hc { display: flex; flex-direction: column; gap: var(--cds-gap-xl); max-width: 1100px; font-family: var(--font-anthropic-sans); color: var(--color-fg); }
+.hc h1 { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
+.hc h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; text-wrap: balance; }
+.hc-head { display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
+.hc-lede { margin: 0; max-width: 70ch; line-height: 1.5; }
+.hc-sub { margin: 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); max-width: 74ch; line-height: 1.45; }
+.hc-sec { display: flex; flex-direction: column; gap: var(--cds-gap-md); min-width: 0; }
+.hc-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--cds-gap-md); }
+.hc-tile { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: flex; flex-direction: column; gap: var(--cds-gap-xs); min-width: 0; }
+.hc-label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.hc-big { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.hc-of { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+.hc-chart { position: relative; min-height: 260px; min-width: 0; }
+.hc-chart svg { display: block; width: 100%; }
+.hc-chart text { fill: var(--cds-text-secondary); font-size: var(--cds-font-size-caption); }
+.hc-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); box-shadow: var(--cds-shadow-popover); border-radius: var(--cds-radius); padding: var(--cds-pad-sm); font-size: var(--cds-font-size-caption); line-height: 1.45; max-width: 280px; z-index: 2; }
+.hc-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: 0; padding: 0; list-style: none; }
+.hc-legend li { display: flex; align-items: center; gap: 6px; }
+.hc-sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.hc-ln { width: 16px; height: 0; border-top: 2px solid; display: inline-block; }
+.hc-dash { width: 16px; height: 0; border-top: 2px dashed var(--cds-chart-reference); display: inline-block; }
+.hc-wrap { overflow-x: auto; min-width: 0; }
+.hc-table { border-collapse: collapse; width: 100%; font-size: var(--cds-font-size-body); font-variant-numeric: tabular-nums; }
+.hc-table th { text-align: left; font-weight: var(--cds-font-weight-medium); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+.hc-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); vertical-align: top; }
+.hc-table .num { text-align: right; white-space: nowrap; }
+.hc-pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: var(--cds-font-size-caption); border: 1px solid var(--color-border-line); white-space: nowrap; }
+.hc-st-graded { color: var(--color-ok); border-color: var(--color-ok); }
+.hc-st-being-graded, .hc-st-agent-writing, .hc-st-agent-finished { color: var(--color-warn); border-color: var(--color-warn); }
+.hc-st-scored-0-rule { color: var(--color-bad); border-color: var(--color-bad); }
+.hc-best { font-weight: var(--cds-font-weight-medium); }
+.hc-funnel { display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
+.hc details summary { cursor: pointer; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+.hc details p { max-width: 74ch; line-height: 1.5; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.hc-tabs { display: flex; gap: var(--cds-gap-xs); border-bottom: 1px solid var(--color-border-line); flex-wrap: wrap; }
+.hc-tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: var(--cds-pad-sm) var(--cds-pad-md); font: inherit; font-size: var(--cds-font-size-body); color: var(--color-fg-muted); cursor: pointer; }
+.hc-tab[aria-selected=true] { color: var(--color-fg); border-bottom-color: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+.hc-tab .hc-count { font-variant-numeric: tabular-nums; color: var(--color-fg-muted); margin-left: 4px; }
+.hc-panel { display: flex; flex-direction: column; gap: var(--cds-gap-xl); }
+.hc-controls { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); align-items: center; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.hc-controls select { font: inherit; font-size: var(--cds-font-size-body); color: var(--color-fg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: 4px 8px; }
+.hc-table tbody tr.hc-click { cursor: pointer; }
+.hc-table tbody tr.hc-click:hover td { background: var(--color-panel); }
+.hc-link { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--color-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; white-space: nowrap; }
+.hc-nav { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); align-items: center; }
+.hc-btn { appearance: none; font: inherit; font-size: var(--cds-font-size-caption); color: var(--color-fg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: 4px 10px; cursor: pointer; }
+.hc-btn[disabled] { opacity: .4; cursor: default; }
+.hc-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
+.hc-checks li { display: grid; grid-template-columns: 26px 1fr; gap: var(--cds-gap-sm); align-items: baseline; }
+.hc-step { font-variant-numeric: tabular-nums; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); border: 1px solid var(--color-border-line); border-radius: 999px; text-align: center; line-height: 22px; width: 24px; }
+.hc-checks .hc-what { font-weight: var(--cds-font-weight-medium); }
+.hc-checks .hc-res { color: var(--color-fg-muted); }
+.hc-kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--cds-gap-sm) var(--cds-gap-lg); margin: 0; }
+.hc-kv div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hc-kv dt { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.hc-kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.hc-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--cds-gap-xl); }
+.hc-two > * { min-width: 0; }
+[data-dash-source-state=refreshing] { opacity: .5; }
+</style>
+
+<div class="hc">
+  <header class="hc-head" id="top">
+    <h1>Big TNO Hill Climb</h1>
+    <p class="hc-lede">Run 1: best recall <b data-draw="num" data-fmt="score" data-source="run1_summary" data-field="best_recall" data-row="0">—</b> from <b data-draw="num" data-fmt="text" data-source="run1_summary" data-field="best_name" data-row="0">—</b>, <b data-draw="num" data-source="run1_summary" data-field="best_found" data-row="0">—</b> of <b data-draw="num" data-source="run1_summary" data-field="known_total" data-row="0">—</b> known large bodies found in <b data-draw="num" data-fmt="2" data-source="run1_summary" data-field="best_gpu_hours" data-row="0">—</b> GPU-hours. <b data-draw="num" data-source="run1_summary" data-field="rounds_graded" data-row="0">—</b> of <b data-draw="num" data-source="run1_summary" data-field="rounds_target" data-row="0">—</b> rounds graded. Being written: <b data-draw="num" data-fmt="text" data-source="run1_summary" data-field="writing" data-row="0">—</b>. Being graded on NERSC: <b data-draw="num" data-fmt="text" data-source="run1_summary" data-field="grading" data-row="0">—</b>.</p>
+    <p class="hc-sub">Updated <span data-draw="num" data-fmt="text" data-source="run1_summary" data-field="asof" data-row="0">—</span> PST. Each round, AI agents (up to 2 hours each) improve the program that finds large distant bodies in thirteen years of DECam detections, and NERSC runs each program on four sky regions, one A100 each, at most 30 minutes per region. Rounds 1 and 2 had one agent, Claude Fable 5.2. In rounds 3 to 20 two agents worked side by side, Claude Fable 5.2 and GPT 6 Astra, both at their highest effort setting, with the same history (every earlier program and its results) and without seeing each other's work; the next round started when both programs were graded. Rounds 21 to 25 have one agent each, GPT 6.2 Astra at effort max, with the same history. Run 1 is the task in its current form: the agents are given every region with its known bodies, each program has two results (recall and GPU-hours), and each program is read for shortcuts. The earlier run, under the first rules, has its own tab.</p>
+  </header>
+
+  <nav class="hc-tabs" role="tablist" aria-label="Views">
+    <button class="hc-tab" role="tab" id="tab-run1" data-tab="run1" aria-controls="run1" aria-selected="true">Run 1</button>
+    <button class="hc-tab" role="tab" id="tab-overview" data-tab="overview" aria-controls="overview" aria-selected="false">Earlier run</button>
+    <button class="hc-tab" role="tab" id="tab-candidates" data-tab="candidates" aria-controls="candidates" aria-selected="false">Candidates<span class="hc-count" data-draw="num" data-source="summary" data-field="candidates" data-row="0">—</span></button>
+    <button class="hc-tab" role="tab" id="tab-data" data-tab="data" aria-controls="data" aria-selected="false">Data</button>
+  </nav>
+
+  <div class="hc-panel" id="run1" role="tabpanel" aria-labelledby="tab-run1">
+  <section class="hc-sec" id="r1-totals">
+    <div class="hc-tiles">
+      <div class="hc-tile"><span class="hc-label">Best recall</span><span class="hc-big" data-draw="num" data-fmt="score" data-source="run1_summary" data-field="best_recall" data-row="0">—</span><span class="hc-of">starting program: <span data-draw="num" data-fmt="score" data-source="run1_summary" data-field="start_recall" data-row="0">—</span></span></div>
+      <div class="hc-tile"><span class="hc-label">Known large bodies found</span><span class="hc-big"><span data-draw="num" data-source="run1_summary" data-field="best_found" data-row="0">—</span> of <span data-draw="num" data-source="run1_summary" data-field="known_total" data-row="0">—</span></span><span class="hc-of">by the best program; the starting program found <span data-draw="num" data-source="run1_summary" data-field="start_found" data-row="0">—</span></span></div>
+      <div class="hc-tile"><span class="hc-label">GPU-hours of the best program</span><span class="hc-big" data-draw="num" data-fmt="2" data-source="run1_summary" data-field="best_gpu_hours" data-row="0">—</span><span class="hc-of">starting program: <span data-draw="num" data-fmt="2" data-source="run1_summary" data-field="start_gpu_hours" data-row="0">—</span>; the most a program can use is <span data-draw="num" data-fmt="2" data-source="run1_summary" data-field="limit_gpu_hours" data-row="0">—</span></span></div>
+      <div class="hc-tile"><span class="hc-label">Rounds graded</span><span class="hc-big"><span data-draw="num" data-source="run1_summary" data-field="rounds_graded" data-row="0">—</span> of <span data-draw="num" data-source="run1_summary" data-field="rounds_target" data-row="0">—</span></span><span class="hc-of"><span data-draw="num" data-source="run1_summary" data-field="programs_graded" data-row="0">—</span> programs graded; writing: <span data-draw="num" data-fmt="text" data-source="run1_summary" data-field="writing" data-row="0">—</span>; being graded: <span data-draw="num" data-fmt="text" data-source="run1_summary" data-field="grading" data-row="0">—</span></span></div>
+    </div>
+  </section>
+
+  <section class="hc-sec" id="r1-recall">
+    <h2>Recall by round</h2>
+    <p class="hc-sub">Recall = weighted share of the 113 known large bodies the program finds in the four graded regions (a body of about 200 km or larger, H 7 or brighter, counts double). Higher is better. Round 0 is the starting program. From round 3 each round has two programs, one per agent.</p>
+    <ul class="hc-legend">
+      <li><span class="hc-sw" data-c="0"></span>Claude Fable 5.2</li>
+      <li><span class="hc-sw" data-c="2"></span>GPT 6 Astra</li>       <li><span class="hc-sw" data-c="3"></span>GPT 6.2 Astra (from round 21)</li>
+      <li><span class="hc-ln" data-c="1"></span>Best program so far</li>
+    </ul>
+    <div class="hc-chart" data-draw="r1-recall-chart" data-source="run1_rounds"></div>
+  </section>
+
+  <section class="hc-sec" id="r1-gpu">
+    <h2>GPU-hours by round</h2>
+    <p class="hc-sub">Run time summed over the four regions, one A100 each. Lower is better. A region is stopped at 1,800 s, so no program can use more than 2.0. The two results are never combined: the run keeps the program with the highest recall and, between equal recalls, the one that used fewer GPU-hours.</p>
+    <ul class="hc-legend">
+      <li><span class="hc-sw" data-c="0"></span>Claude Fable 5.2</li>
+      <li><span class="hc-sw" data-c="2"></span>GPT 6 Astra</li>       <li><span class="hc-sw" data-c="3"></span>GPT 6.2 Astra (from round 21)</li>
+      <li><span class="hc-ln" data-c="1"></span>Best program so far</li>
+      <li><span class="hc-dash"></span>Limit 2.0</li>
+    </ul>
+    <div class="hc-chart" data-draw="r1-gpu-chart" data-source="run1_rounds"></div>
+  </section>
+
+  <section class="hc-sec" id="r1-regions">
+    <h2>Known bodies found per region</h2>
+    <p class="hc-sub">The four graded regions, each a patch of sky near the ecliptic. The number after each name is how many known large bodies can be found there. From round 3 a round has two programs: the line follows the round's better program (filled circle), and the other program is the open circle.</p>
+    <ul class="hc-legend">
+      <li><span class="hc-ln" data-c="0"></span>REG_A (27 findable)</li>
+      <li><span class="hc-ln" data-c="1"></span>REG_B (33)</li>
+      <li><span class="hc-ln" data-c="2"></span>R009 (35)</li>
+      <li><span class="hc-ln" data-c="3"></span>R013 (18)</li>
+    </ul>
+    <div class="hc-chart" data-draw="r1-region-chart" data-source="run1_regions"></div>
+  </section>
+
+  <section class="hc-sec" id="r1-rounds">
+    <h2>Rounds</h2>
+    <p class="hc-sub">One row per program. Gained and lost count known bodies against the best program before that round. Script check is what reading that program showed.</p>
+    <div class="hc-wrap">
+      <table class="hc-table" data-source="run1_rounds" data-row-key="gen">
+        <thead><tr><th data-field="round">Round</th><th data-field="agent">Agent</th><th data-field="state">State</th><th data-field="started">Started</th><th data-field="agent_minutes" class="num">Agent min</th><th data-field="recall" class="num">Recall</th><th data-field="gpu_hours" class="num">GPU-hours</th><th data-field="known_found" class="num">Known found</th><th data-field="found_R001" class="num">REG_A</th><th data-field="found_R002" class="num">REG_B</th><th data-field="found_R009" class="num">R009</th><th data-field="found_R013" class="num">R013</th><th data-field="gained" class="num">Gained</th><th data-field="lost" class="num">Lost</th><th data-field="leads" class="num">Leads</th><th data-field="method">Method (agent's own words)</th><th data-field="check">Script check</th></tr></thead>
+        <tbody data-draw="r1-rounds-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="hc-sec" id="r1-log">
+    <h2>Log</h2>
+    <div class="hc-wrap">
+      <table class="hc-table" data-source="run1_events" data-row-key="n">
+        <thead><tr><th data-field="t">When (PST)</th><th data-field="who">Round</th><th data-field="text">What</th></tr></thead>
+        <tbody data-draw="r1-events-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <details id="r1-about">
+    <summary>How Run 1 works</summary>
+    <p>Run 1 has no hidden set. Each agent is given all 23 regions we have prepared, with every known body's detections, name and size, the full record of the earlier run, and every earlier program of this run with its results. It is asked for a general method that finds as many known large bodies as possible with as little GPU time as possible, and that also reports unknown ones. Four regions are graded: REG_A, REG_B, R009 and R013, with 113 known large bodies that have detections on at least 5 nights. A body counts as found when one candidate holds it on at least 5 nights, at least 80% of that candidate's detections are the body, and the candidate is in the top 226 by the program's own confidence (twice the number of known bodies, so there is room for as many new ones). Because the agent can see the answers, every program is read by hand for shortcuts: body names, stored positions, row numbers, settings per region. A candidate in the scored list that matches no known body is a lead and goes to the same checks as the earlier run's.</p>
+  </details>
+  </div>
+
+  <div class="hc-panel" id="overview" role="tabpanel" aria-labelledby="tab-overview" hidden>
+  <p class="hc-sub" id="earlier-note">The earlier run (12–14 November 2026) used the first rules: three sealed regions the agent never saw, one score, an hour per region on one A100. It ended after round 36 with a best score of 0.6061. Its round 19 program is the starting program of Run 1. The Candidates and Data tabs describe this earlier run.</p>
+  <section class="hc-sec" id="totals">
+    <div class="hc-tiles">
+      <div class="hc-tile" id="tile-best"><span class="hc-label">Best score</span><span class="hc-big" data-draw="num" data-fmt="score" data-source="summary" data-field="best_score" data-row="0">—</span><span class="hc-of">starter (plain search): <span data-draw="num" data-fmt="score" data-source="summary" data-field="starter_score" data-row="0">—</span></span></div>
+      <div class="hc-tile" id="tile-known"><span class="hc-label">Known large bodies found</span><span class="hc-big"><span data-draw="num" data-source="summary" data-field="best_known" data-row="0">—</span> of <span data-draw="num" data-source="summary" data-field="known_total" data-row="0">—</span></span><span class="hc-of">by the best program, H ≤ 8, seen on 5+ nights</span></div>
+      <div class="hc-tile" id="tile-rounds"><span class="hc-label">Rounds graded</span><span class="hc-big" data-draw="num" data-source="summary" data-field="rounds_graded" data-row="0">—</span><span class="hc-of">the run has ended</span></div>
+      <div class="hc-tile" id="tile-leads"><span class="hc-label">Candidates not in the MPC's files</span><span class="hc-big" data-draw="num" data-source="summary" data-field="not_in_mpc" data-row="0">—</span><span class="hc-of">of <span data-draw="num" data-source="summary" data-field="leads" data-row="0">—</span> leads; <span data-draw="num" data-source="summary" data-field="likely_real" data-row="0">—</span> pass the image check, <span data-draw="num" data-source="summary" data-field="sent_observer" data-row="0">—</span> sent to OBSERVER_NAME</span></div>
+    </div>
+  </section>
+
+  <section class="hc-sec" id="score">
+    <h2>Score by round</h2>
+    <p class="hc-sub">Score = weighted share of the known large bodies the program puts in its top list (bodies of H ≤ 7, about 200 km and up, count double). The line is the best so far; the dashed line is the 0.7 goal.</p>
+    <ul class="hc-legend">
+      <li><span class="hc-sw" data-c="0"></span>Round score (NERSC A100)</li>
+      <li><span class="hc-ln" data-c="1"></span>Best so far</li>
+      <li><span class="hc-sw" data-c="muted"></span>First grade on Vista GB200 (older rounds)</li>
+      <li><span class="hc-dash"></span>Goal 0.7</li>
+    </ul>
+    <div class="hc-chart" data-draw="score-chart" data-source="rounds"></div>
+  </section>
+
+  <section class="hc-sec" id="regions">
+    <h2>Known bodies found per region</h2>
+    <p class="hc-sub">Region A = REG_A, B = REG_B, C = REG_C: three sky regions near the ecliptic with every public DECam exposure 2013–2026. Each line ends at the number of findable known bodies in that region.</p>
+    <ul class="hc-legend">
+      <li><span class="hc-ln" data-c="0"></span>Region A (27 findable)</li>
+      <li><span class="hc-ln" data-c="1"></span>Region B (27)</li>
+      <li><span class="hc-ln" data-c="2"></span>Region C (8)</li>
+    </ul>
+    <div class="hc-chart" data-draw="region-chart" data-source="regions"></div>
+  </section>
+
+  <section class="hc-sec" id="funnel">
+    <h2>Candidate checks</h2>
+    <p class="hc-sub">A lead is a confident candidate in the scored list that matches no known large body. Each step keeps only those that pass it. Counts only: no candidate is named or placed here until it is reported.</p>
+    <div class="hc-wrap">
+      <table class="hc-table" data-source="funnel" data-row-key="step">
+        <thead><tr><th data-field="step" class="num">Step</th><th data-field="stage">Check</th><th data-field="count" class="num">Count</th><th>Share of leads</th></tr></thead>
+        <tbody data-draw="funnel-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="hc-sec" id="rounds">
+    <h2>Rounds</h2>
+    <div class="hc-wrap">
+      <table class="hc-table" data-source="rounds" data-row-key="gen">
+        <thead><tr><th data-field="gen">Round</th><th data-field="state">State</th><th data-field="started">Started</th><th data-field="agent_minutes" class="num">Agent min</th><th data-field="base">Built on</th><th data-field="score" class="num">Score</th><th data-field="score_gb200" class="num">GB200 score</th><th data-field="known_found" class="num">Known found</th><th data-field="found_A" class="num">A</th><th data-field="found_B" class="num">B</th><th data-field="found_C" class="num">C</th><th data-field="leads" class="num">Leads</th><th data-field="method">Method (agent's own words)</th></tr></thead>
+        <tbody data-draw="rounds-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="hc-sec" id="log">
+    <h2>Log</h2>
+    <div class="hc-wrap">
+      <table class="hc-table" data-source="events" data-row-key="n">
+        <thead><tr><th data-field="t">When (PST)</th><th data-field="gen">Round</th><th data-field="text">What</th></tr></thead>
+        <tbody data-draw="events-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  </div>
+
+  <div class="hc-panel" id="candidates" role="tabpanel" aria-labelledby="tab-candidates" hidden>
+    <div class="hc-panel" id="cand-list">
+      <section class="hc-sec">
+        <h2>Candidates</h2>
+        <p class="hc-sub">Each candidate is a confident linkage the program put in its scored list that matches no known large body. A body found again in a later round stays one candidate. Each goes through four checks in turn: the MPC's files, an image check in the region's own exposures, images the program never used, then follow-up by OBSERVER_NAME. Open one for its own page. No sky positions, dates or images appear here until a body is reported.</p>
+        <div class="hc-tiles">
+          <div class="hc-tile"><span class="hc-label">Candidates</span><span class="hc-big" data-draw="num" data-source="summary" data-field="candidates" data-row="0">—</span><span class="hc-of">from all graded rounds</span></div>
+          <div class="hc-tile"><span class="hc-label">Not in the MPC's files</span><span class="hc-big" data-draw="num" data-source="summary" data-field="new_candidates" data-row="0">—</span><span class="hc-of">no known body of any size there</span></div>
+          <div class="hc-tile"><span class="hc-label">Plausible new bodies</span><span class="hc-big" data-draw="num" data-source="summary" data-field="plausible" data-row="0">—</span><span class="hc-of">new, and seen where the orbit predicts</span></div>
+          <div class="hc-tile"><span class="hc-label">Sent to OBSERVER_NAME</span><span class="hc-big" data-draw="num" data-source="summary" data-field="sent_observer" data-row="0">—</span><span class="hc-of">ten per email</span></div>
+        </div>
+      </section>
+      <section class="hc-sec" id="cand-orbits">
+        <h2>Their orbits</h2>
+        <p class="hc-sub">Size of orbit (semimajor axis) against how elongated it is, from each candidate's own detections. Orbits from one season are loose. Left of the curve an orbit would cross Neptune's; the dashed lines are Neptune's 3:2 resonance, where Pluto sits, and its 2:1. Dot size follows the body's size. Click a dot to open its page.</p>
+        <ul class="hc-legend">
+          <li><span class="hc-sw" data-c="0"></span>Plausible (new, seen again), or sent to OBSERVER_NAME</li>
+          <li><span class="hc-sw" data-c="1"></span>New, checks still running</li>
+          <li><span class="hc-sw" data-c="muted"></span>Known, or failed a check</li>
+        </ul>
+        <div class="hc-chart" data-draw="orbit-chart" data-source="candidates"></div>
+      </section>
+      <section class="hc-sec" id="cand-table">
+        <h2>All candidates</h2>
+        <div class="hc-controls">
+          <label>Show <select id="cand-show"><option value="all">All</option><option value="new">Not in the MPC's files</option><option value="plausible">Plausible or sent</option><option value="out">Known or failed</option></select></label>
+          <label>Sort <select id="cand-sort"><option value="stage">Furthest through the checks</option><option value="size">Largest first</option><option value="rank">Round, then rank</option></select></label>
+          <span data-draw="cand-count" data-source="candidates"></span>
+        </div>
+        <div class="hc-wrap">
+          <table class="hc-table" data-source="candidates" data-row-key="key">
+            <thead><tr><th data-field="key">Candidate</th><th data-field="status">Status</th><th data-field="seen_in">Rounds</th><th data-field="region">Region</th><th data-field="p" class="num">Confidence</th><th data-field="nights" class="num">Nights</th><th data-field="arc_days" class="num">Arc (days)</th><th data-field="H" class="num">H</th><th data-field="D10" class="num">Size km</th><th data-field="r" class="num">Now at (au)</th><th data-field="a" class="num">a (au)</th><th data-field="e" class="num">e</th><th data-field="i" class="num">i (°)</th></tr></thead>
+            <tbody data-draw="cand-rows"></tbody>
+          </table>
+        </div>
+        <p class="hc-sub">Size at albedo 0.10; each candidate's page gives the range for albedo 0.05 to 0.20.</p>
+      </section>
+    </div>
+
+    <div class="hc-panel" id="cand-page" hidden>
+      <div class="hc-nav">
+        <button class="hc-btn" id="cand-back">← All candidates</button>
+        <button class="hc-btn" id="cand-prev">Previous</button>
+        <button class="hc-btn" id="cand-next">Next</button>
+      </div>
+      <div data-draw="cand-detail" data-source="candidates"></div>
+    </div>
+  </div>
+
+  <div class="hc-panel" id="data" role="tabpanel" aria-labelledby="tab-data" hidden>
+    <section class="hc-sec">
+      <h2>What the programs read</h2>
+      <p class="hc-sub">Each sealed region is one patch of sky near the ecliptic, about 54 deg², with every public DECam exposure that covers it over eleven years. The programs never see pixels. They read our own list of every source in every exposure: the Community Pipeline's calibrated images, searched on TACC with a filter matched to each CCD's seeing, keeping every peak at S/N 4.5 or more. Stars, galaxies, noise peaks, cosmic rays and asteroids are all in it; a distant body is a few dozen rows among tens of millions, moving a few arcseconds an hour.</p>
+      <div class="hc-tiles">
+        <div class="hc-tile"><span class="hc-label">Detections</span><span class="hc-big" data-draw="num" data-fmt="M" data-source="data_totals" data-field="detections" data-row="0">—</span><span class="hc-of">in three regions</span></div>
+        <div class="hc-tile"><span class="hc-label">Exposures</span><span class="hc-big" data-draw="num" data-source="data_totals" data-field="exposures" data-row="0">—</span><span class="hc-of">single DECam images, all bands</span></div>
+        <div class="hc-tile"><span class="hc-label">Detection lists</span><span class="hc-big"><span data-draw="num" data-fmt="1" data-source="data_totals" data-field="det_gb" data-row="0">—</span> GB</span><span class="hc-of">made from <span data-draw="num" data-fmt="1" data-source="data_totals" data-field="images_tb" data-row="0">—</span> TB of images</span></div>
+        <div class="hc-tile"><span class="hc-label">Known large bodies to find</span><span class="hc-big" data-draw="num" data-source="data_totals" data-field="known_findable" data-row="0">—</span><span class="hc-of">H ≤ 8, seen on 5+ nights</span></div>
+      </div>
+    </section>
+    <section class="hc-sec">
+      <h2>The three regions</h2>
+      <div class="hc-wrap">
+        <table class="hc-table" data-source="data_regions" data-row-key="region">
+          <thead><tr><th data-field="region">Region</th><th data-field="centre">Centre (deg)</th><th data-field="area_deg2" class="num">Area (deg²)</th><th data-field="years">Years</th><th data-field="exposures" class="num">Exposures</th><th data-field="detections" class="num">Detections</th><th data-field="det_gb" class="num">Lists (GB)</th><th data-field="images_tb" class="num">Images (TB)</th><th data-field="known_findable" class="num">Known bodies to find</th></tr></thead>
+          <tbody data-draw="data-rows"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="hc-sec">
+      <h2>Exposures by year</h2>
+      <p class="hc-sub">How often DECam looked at each region. A body has to be detected on several nights to be linked; seasons with many nights give the long arcs that pin an orbit down.</p>
+      <ul class="hc-legend">
+        <li><span class="hc-sw" data-c="0"></span>Region A</li>
+        <li><span class="hc-sw" data-c="1"></span>Region B</li>
+        <li><span class="hc-sw" data-c="2"></span>Region C</li>
+      </ul>
+      <div class="hc-chart" data-draw="year-chart" data-source="data_years"></div>
+    </section>
+    <div class="hc-two">
+      <section class="hc-sec">
+        <h2>One detection</h2>
+        <div class="hc-wrap"><table class="hc-table">
+          <thead><tr><th>Column</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td>ra, dec</td><td>sky position (deg), from the CCD's own astrometric solution (Gaia-tied)</td></tr>
+            <tr><td>exp</td><td>which exposure (row of the exposure table)</td></tr>
+            <tr><td>ccd, x, y</td><td>which of DECam's 62 CCDs, and the pixel position on it</td></tr>
+            <tr><td>flux, ferr</td><td>brightness in counts and its error; magnitude = zero point − 2.5 log₁₀ flux</td></tr>
+            <tr><td>snr</td><td>signal-to-noise of the matched-filter peak (all ≥ 4.5)</td></tr>
+            <tr><td>sharp</td><td>peak pixel against the seeing's peak for that flux: about 1 for a star or a moving body, much more than 1 for a cosmic ray</td></tr>
+            <tr><td>flag</td><td>bits: 1 near saturation, 2 masked pixels nearby, 4 near a CCD edge</td></tr>
+          </tbody></table></div>
+      </section>
+      <section class="hc-sec">
+        <h2>One exposure</h2>
+        <div class="hc-wrap"><table class="hc-table">
+          <thead><tr><th>Field</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td>mjd_mid</td><td>mid-exposure time</td></tr>
+            <tr><td>band, exptime</td><td>filter (g, r, i, z, Y, VR) and seconds open</td></tr>
+            <tr><td>magzero, m5</td><td>photometric zero point and the 5σ depth, typically mag 22.5–24</td></tr>
+            <tr><td>fwhm, airmass</td><td>seeing and how low in the sky</td></tr>
+            <tr><td>ra0, dec0</td><td>where the camera pointed (its field is about 1° in radius)</td></tr>
+            <tr><td>obs_xyz</td><td>where the telescope was in the solar system then, for the parallax that gives a body's distance</td></tr>
+          </tbody></table></div>
+      </section>
+    </div>
+    <p class="hc-sub">Agents develop on a fourth, unscored region (about 35 million detections, 356 exposures) with no answers; the three regions above, and which known bodies are in them, stay sealed on our side and are used only to grade.</p>
+  </div>
+
+  <details id="about">
+    <summary>How the score and the checks work</summary>
+    <p>Each sealed region holds every detection from single DECam exposures (S/N ≥ 4.5) across 2013–2026. The program reports candidates, each a set of detections with a confidence. All regions' candidates are ranked together; the scored list holds twice as many slots as there are known bodies with H ≤ 8 seen on at least 5 nights (62, so 124 slots). A known body counts as found when 80% of a candidate's detections are its own and cover 5 of its nights. Rounds 0 and 1 were first graded on Vista GB200 nodes and are regraded on NERSC A100s so every score compares on the same hardware. A lead goes to the novelty check against the MPC's files, then to an image check (is it detected where its orbit says it should be, and not at shifted places), then to images the program never saw; candidates that pass go to OBSERVER_NAME for follow-up, ten at a time.</p>
+  </details>
+</div>
+
+<script>
+// One dataset per list inside score.json.
+['summary', 'rounds', 'regions', 'funnel', 'events', 'candidates', 'data_regions', 'data_years', 'run1_summary', 'run1_rounds', 'run1_regions', 'run1_events'].forEach((k) => {
+  dash.loader(k, {description: `The "${k}" list of score.json`, fn: ({answer}) => {
+    const a = typeof answer === 'string' ? JSON.parse(answer) : answer;
+    if (!a || !Array.isArray(a[k])) throw new Error(`score.json has no "${k}" list`);
+    return a[k];
+  }});
+});
+</script>
+
+<script>
+window.hcGoal = 0.7;   // the user's goal: 0.5 ("keep iterating until we reach like 50%+ score"), raised 2026-11-13 ("set to 07, iterate for 20 more gen")
+window.hcFmt = (v, kind) => {
+  if (v === null || v === undefined || v === '') return '—';
+  if (kind === 'text' || typeof v !== 'number') return String(v);
+  if (kind === 'score') return d3.format('.4f')(v);
+  if (kind === 'pct') return d3.format('.0%')(v);
+  if (kind === 'M') return d3.format('.1f')(v / 1e6) + ' M';
+  if (kind === '1') return d3.format('.1f')(v);
+  if (kind === '2') return d3.format('.2f')(v);
+  return d3.format(',~')(v);
+};
+window.hcCell = (text, cls) => { const c = document.createElement('td'); c.textContent = text; if (cls) c.className = cls; return c; };
+window.hcEmpty = (tb, n, text) => { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = n; td.textContent = text; td.style.color = 'var(--color-fg-muted)'; tr.append(td); tb.replaceChildren(tr); };
+
+dash.onData(() => {
+  document.querySelectorAll('.hc [data-c]').forEach((s) => {
+    const c = s.dataset.c, col = c === 'muted' ? 'var(--cds-chart-muted)' : dash.colors[+c];
+    if (s.classList.contains('hc-ln')) s.style.borderTopColor = col; else s.style.background = col;
+  });
+});
+
+dash.draw('num', (el) => {
+  const g = dash.data(el.dataset.source);
+  if (g.status !== 'ok' || !g.data || !g.data.length) { el.textContent = '—'; return; }
+  el.textContent = window.hcFmt(g.data[0][el.dataset.field], el.dataset.fmt);
+});
+
+// Each script runs in its own scope, so helpers that other scripts use live on window.
+window.hcAxes = function (svg, x, y, W, H, m, yfmt) {
+  const gx = svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.min(10, W / 70)).tickFormat(d3.format('d')).tickSizeOuter(0));
+  const gy = svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(5).tickFormat(yfmt).tickSizeOuter(0));
+  [gx, gy].forEach((a) => { a.selectAll('path,line').style('stroke', 'var(--cds-chart-axis)'); a.selectAll('text').style('fill', 'var(--cds-text-secondary)').style('font-size', 'var(--cds-font-size-caption)'); });
+  svg.append('g').selectAll('line').data(y.ticks(5)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', (d) => y(d)).attr('y2', (d) => y(d)).style('stroke', 'var(--cds-chart-grid)');
+};
+
+window.hcTip = function (el, tip, ev, lines) {
+  const box = el.getBoundingClientRect();
+  tip.replaceChildren(); lines.forEach((t, i) => { const d = document.createElement(i ? 'div' : 'strong'); d.textContent = t; tip.append(d); });
+  tip.hidden = false;
+  tip.style.left = Math.max(0, Math.min(ev.clientX - box.left + 12, box.width - 290)) + 'px';
+  tip.style.top = Math.max(0, ev.clientY - box.top - 10) + 'px';
+};
+
+dash.draw('score-chart', {
+  mount(el) {
+    const svg = d3.select(el).append('svg').attr('role', 'img').attr('aria-label', 'Score of each round with the best score so far and the 0.5 goal');
+    const tip = document.createElement('div'); tip.className = 'hc-tip'; tip.hidden = true; el.append(tip);
+    return {svg, tip};
+  },
+  update(el, {svg, tip}) {
+    const g = dash.data('rounds');
+    const W = Math.max(280, el.clientWidth || 600), H = 260, m = {l: 48, r: 14, t: 10, b: 26};
+    svg.attr('viewBox', `0 0 ${W} ${H}`).attr('height', H); svg.selectAll('*').remove();
+    if (g.status !== 'ok') { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text(g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+    const rows = g.data;
+    const maxR = Math.max(5, d3.max(rows, (r) => r.round) || 0);
+    const x = d3.scaleLinear([0, maxR], [m.l, W - m.r]);
+    const ymax = Math.max(window.hcGoal + 0.05, d3.max(rows, (r) => Math.max(r.score || 0, r.score_gb200 || 0)) || 0);
+    const y = d3.scaleLinear([0, ymax], [H - m.b, m.t]).nice();
+    window.hcAxes(svg, x, y, W, H, m, d3.format('.1f'));
+    svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y(window.hcGoal)).attr('y2', y(window.hcGoal))
+      .style('stroke', 'var(--cds-chart-reference)').style('stroke-width', 1.5).style('stroke-dasharray', '5 4');
+    const sc = rows.filter((r) => typeof r.score === 'number').sort((a, b) => a.round - b.round);
+    let best = -1; const bs = sc.map((r) => { best = Math.max(best, r.score); return [r.round, best]; });
+    if (bs.length) {
+      const stepped = []; bs.forEach((p, i) => { if (i) stepped.push([p[0], bs[i - 1][1]]); stepped.push(p); });
+      svg.append('path').attr('d', d3.line().x((p) => x(p[0])).y((p) => y(p[1]))(stepped)).style('fill', 'none').style('stroke', dash.colors[1]).style('stroke-width', 2);
+    }
+    const old = rows.filter((r) => typeof r.score_gb200 === 'number');
+    const hit = (sel, val, color) => sel.join('circle').attr('cx', (r) => x(r.round)).attr('cy', (r) => y(val(r))).attr('r', 5)
+      .style('fill', color).style('stroke', 'var(--color-bg)').style('stroke-width', 2)
+      .on('pointerenter pointermove', (ev, r) => window.hcTip(el, tip, ev, [`${r.gen}${r.best ? ' (best)' : ''}`, `Score ${window.hcFmt(r.score, 'score')} (NERSC A100)`,
+        `GB200 score ${window.hcFmt(r.score_gb200, 'score')}`, `Known found ${window.hcFmt(r.known_found)} of ${window.hcFmt(r.known_total)}`, r.method || '']))
+      .on('pointerleave', () => { tip.hidden = true; });
+    hit(svg.append('g').selectAll('circle').data(old), (r) => r.score_gb200, 'var(--cds-chart-muted)');
+    hit(svg.append('g').selectAll('circle').data(sc), (r) => r.score, dash.colors[0]);
+    if (!sc.length && !old.length) svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No round graded yet');
+  }
+});
+
+dash.draw('region-chart', {
+  mount(el) {
+    const svg = d3.select(el).append('svg').attr('role', 'img').attr('aria-label', 'Known bodies found in each sealed region, by round');
+    const tip = document.createElement('div'); tip.className = 'hc-tip'; tip.hidden = true; el.append(tip);
+    return {svg, tip};
+  },
+  update(el, {svg, tip}) {
+    const g = dash.data('regions');
+    const W = Math.max(280, el.clientWidth || 600), H = 240, m = {l: 40, r: 14, t: 10, b: 26};
+    svg.attr('viewBox', `0 0 ${W} ${H}`).attr('height', H); svg.selectAll('*').remove();
+    if (g.status !== 'ok') { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text(g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+    const rows = g.data;
+    const x = d3.scaleLinear([0, Math.max(5, d3.max(rows, (r) => r.round) || 0)], [m.l, W - m.r]);
+    const y = d3.scaleLinear([0, Math.max(10, d3.max(rows, (r) => r.findable) || 0)], [H - m.b, m.t]).nice();
+    window.hcAxes(svg, x, y, W, H, m, d3.format('d'));
+    ['A', 'B', 'C'].forEach((reg, i) => {
+      const pts = rows.filter((r) => r.region === reg).sort((a, b) => a.round - b.round);
+      if (!pts.length) return;
+      svg.append('path').attr('d', d3.line().x((r) => x(r.round)).y((r) => y(r.found))(pts)).style('fill', 'none').style('stroke', dash.colors[i]).style('stroke-width', 2);
+      svg.append('g').selectAll('circle').data(pts).join('circle').attr('cx', (r) => x(r.round)).attr('cy', (r) => y(r.found)).attr('r', 4.5)
+        .style('fill', dash.colors[i]).style('stroke', 'var(--color-bg)').style('stroke-width', 2)
+        .on('pointerenter pointermove', (ev, r) => window.hcTip(el, tip, ev, [`${r.gen}, region ${r.region}`, `${r.found} of ${r.findable} findable known bodies`, `${d3.format(',')(r.seconds)} s on one A100`]))
+        .on('pointerleave', () => { tip.hidden = true; });
+    });
+    if (!rows.length) svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No round graded on NERSC yet');
+  }
+});
+
+dash.draw('funnel-rows', (tb) => {
+  const g = dash.data('funnel');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 4, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  const top = (g.data[0] && g.data[0].count) || 0, C = window.hcCell;
+  tb.replaceChildren(...g.data.map((r) => {
+    const tr = document.createElement('tr');
+    const bar = document.createElement('td'); const t = document.createElement('div'); t.style.cssText = 'height:8px;min-width:90px;border-radius:4px;background:var(--cds-chart-grid);overflow:hidden';
+    const f = document.createElement('div'); f.style.cssText = `height:100%;border-radius:4px;width:${top ? 100 * r.count / top : 0}%;background:${dash.colors[0]}`; t.append(f); bar.append(t);
+    tr.append(C(r.step, 'num'), C(r.stage), C(window.hcFmt(r.count), 'num'), bar);
+    return tr;
+  }));
+});
+
+dash.draw('rounds-rows', (tb) => {
+  const g = dash.data('rounds');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 13, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  const F = window.hcFmt, C = window.hcCell;
+  tb.replaceChildren(...[...g.data].reverse().map((r) => {
+    const tr = document.createElement('tr'); tr.dataset.key = r.gen;
+    const st = document.createElement('td'); const p = document.createElement('span'); p.className = 'hc-pill hc-st-' + String(r.state).replace(/[^a-z0-9]+/gi, '-').replace(/-+$/, '').toLowerCase(); p.textContent = r.state; st.append(p);
+    const gen = C(r.gen + (r.best ? ' (best)' : '')); if (r.best) gen.className = 'hc-best';
+    tr.append(gen, st, C(r.started), C(F(r.agent_minutes), 'num'), C(r.base), C(F(r.score, 'score'), 'num'), C(F(r.score_gb200, 'score'), 'num'),
+      C(F(r.known_found), 'num'), C(F(r.found_A), 'num'), C(F(r.found_B), 'num'), C(F(r.found_C), 'num'), C(F(r.leads), 'num'), C(r.method));
+    return tr;
+  }));
+});
+
+dash.draw('events-rows', (tb) => {
+  const g = dash.data('events');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 3, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  if (!g.data.length) { window.hcEmpty(tb, 3, 'Nothing logged yet.'); return; }
+  const C = window.hcCell;
+  tb.replaceChildren(...g.data.map((r) => { const tr = document.createElement('tr'); tr.dataset.key = String(r.n); tr.append(C(r.t), C(r.gen), C(r.text)); return tr; }));
+});
+</script>
+
+<script>
+// Run 1 (internally run r2): two results per round, on two charts with one scale each.
+window.hcR1Best = (rows) => {            // the run's rule: highest recall, then fewer GPU-hours; returns [round, best row so far]
+  let b = null; const out = [];
+  rows.filter((r) => r.state === 'graded' && typeof r.recall === 'number').sort((a, c) => a.round - c.round || String(a.gen).localeCompare(String(c.gen))).forEach((r) => {
+    if (!b || r.recall > b.recall || (r.recall === b.recall && r.gpu_hours < b.gpu_hours)) b = r;
+    out.push([r.round + (r.slot || 0) * 0.14, b]);
+  });
+  return out;
+};
+function hcR1Chart(name, field, label, o) {
+  dash.draw(name, {
+    mount(el) {
+      const svg = d3.select(el).append('svg').attr('role', 'img').attr('aria-label', label);
+      const tip = document.createElement('div'); tip.className = 'hc-tip'; tip.hidden = true; el.append(tip);
+      return {svg, tip};
+    },
+    update(el, {svg, tip}) {
+      const g = dash.data('run1_rounds');
+      const W = Math.max(280, el.clientWidth || 600), H = 240, m = {l: 48, r: 14, t: 10, b: 26};
+      svg.attr('viewBox', `0 0 ${W} ${H}`).attr('height', H); svg.selectAll('*').remove();
+      if (g.status !== 'ok') { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text(g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+      const rows = g.data.filter((r) => typeof r[field] === 'number').sort((a, b) => a.round - b.round);
+      const x = d3.scaleLinear([0, Math.max(10, d3.max(g.data, (r) => r.round) || 0)], [m.l, W - m.r]);
+      const y = d3.scaleLinear([0, Math.max(o.ymin, (d3.max(rows, (r) => r[field]) || 0) * 1.1)], [H - m.b, m.t]).nice();
+      window.hcAxes(svg, x, y, W, H, m, d3.format(o.axis));
+      if (o.ref) svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y(o.ref)).attr('y2', y(o.ref))
+        .style('stroke', 'var(--cds-chart-reference)').style('stroke-width', 1.5).style('stroke-dasharray', '5 4');
+      const bs = window.hcR1Best(g.data).map(([rd, b]) => [rd, b[field]]);
+      if (bs.length) {
+        const stepped = []; bs.forEach((p, i) => { if (i) stepped.push([p[0], bs[i - 1][1]]); stepped.push(p); });
+        const last = bs[bs.length - 1]; if (last[0] < x.domain()[1] && bs.length === 1) stepped.push([last[0] + 0.4, last[1]]);
+        svg.append('path').attr('d', d3.line().x((p) => x(p[0])).y((p) => y(p[1]))(stepped)).style('fill', 'none').style('stroke', dash.colors[1]).style('stroke-width', 2);
+      }
+      const F = window.hcFmt;
+      svg.append('g').selectAll('circle').data(rows).join('circle').attr('cx', (r) => x(r.round + (r.slot || 0) * 0.14)).attr('cy', (r) => y(r[field])).attr('r', 5)
+        .style('fill', (r) => dash.colors[/6\.2 Astra/.test(r.agent || '') ? 3 : /Astra/.test(r.agent || '') ? 2 : 0]).style('stroke', 'var(--color-bg)').style('stroke-width', 2)
+        .on('pointerenter pointermove', (ev, r) => window.hcTip(el, tip, ev, [`Round ${r.round}${r.agent ? ', ' + r.agent : ' (starting program)'}${r.best ? ' (best)' : ''}`, `Recall ${F(r.recall, 'score')}`, `${F(r.gpu_hours, '2')} GPU-hours`,
+          `Known found ${F(r.known_found)} of ${F(r.known_total)}`, r.vs ? `Against ${r.vs}: gained ${F(r.gained)}, lost ${F(r.lost)}` : '', r.method || '']))
+        .on('pointerleave', () => { tip.hidden = true; });
+      if (!rows.length) svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No round graded yet');
+    }
+  });
+}
+hcR1Chart('r1-recall-chart', 'recall', 'Recall of each round of Run 1, with the best program so far', {ymin: 0.6, axis: '.1f'});
+hcR1Chart('r1-gpu-chart', 'gpu_hours', 'GPU-hours used by each round of Run 1, with the best program so far and the 2.0 limit', {ymin: 2.1, axis: '.1f', ref: 2.0});
+
+dash.draw('r1-region-chart', {
+  mount(el) {
+    const svg = d3.select(el).append('svg').attr('role', 'img').attr('aria-label', 'Known bodies found in each graded region of Run 1, by round');
+    const tip = document.createElement('div'); tip.className = 'hc-tip'; tip.hidden = true; el.append(tip);
+    return {svg, tip};
+  },
+  update(el, {svg, tip}) {
+    const g = dash.data('run1_regions');
+    const W = Math.max(280, el.clientWidth || 600), H = 240, m = {l: 40, r: 14, t: 10, b: 26};
+    svg.attr('viewBox', `0 0 ${W} ${H}`).attr('height', H); svg.selectAll('*').remove();
+    if (g.status !== 'ok') { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text(g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+    const rows = g.data;
+    const x = d3.scaleLinear([0, Math.max(10, d3.max(rows, (r) => r.round) || 0)], [m.l, W - m.r]);
+    const y = d3.scaleLinear([0, Math.max(10, d3.max(rows, (r) => r.findable) || 0)], [H - m.b, m.t]).nice();
+    window.hcAxes(svg, x, y, W, H, m, d3.format('d'));
+    ['REG_A', 'REG_B', 'R009', 'R013'].forEach((reg, i) => {
+      const pts = rows.filter((r) => r.region === reg).sort((a, b) => a.round - b.round);
+      if (!pts.length) return;
+      const px = (r) => x(r.round + (r.lead === false ? (r.slot || 0) * 0.14 : 0));
+      svg.append('path').attr('d', d3.line().x(px).y((r) => y(r.found))(pts.filter((r) => r.lead !== false))).style('fill', 'none').style('stroke', dash.colors[i]).style('stroke-width', 2);
+      svg.append('g').selectAll('circle').data(pts).join('circle').attr('cx', px).attr('cy', (r) => y(r.found)).attr('r', (r) => (r.lead === false ? 3.5 : 4.5))
+        .style('fill', (r) => (r.lead === false ? 'var(--color-bg)' : dash.colors[i])).style('stroke', (r) => (r.lead === false ? dash.colors[i] : 'var(--color-bg)')).style('stroke-width', 2)
+        .on('pointerenter pointermove', (ev, r) => window.hcTip(el, tip, ev, [`Round ${r.round}${r.agent ? ', ' + r.agent : ''}, ${r.region}`, `${r.found} of ${r.findable} findable known bodies`, `${d3.format(',')(r.seconds)} s on one A100 (stopped at 1,800 s)`]))
+        .on('pointerleave', () => { tip.hidden = true; });
+    });
+    if (!rows.length) svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No round graded yet');
+  }
+});
+
+dash.draw('r1-rounds-rows', (tb) => {
+  const g = dash.data('run1_rounds');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 17, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  const F = window.hcFmt, C = window.hcCell;
+  tb.replaceChildren(...[...g.data].reverse().map((r) => {
+    const tr = document.createElement('tr'); tr.dataset.key = r.gen;
+    const st = document.createElement('td'); const p = document.createElement('span'); p.className = 'hc-pill hc-st-' + String(r.state).replace(/[^a-z0-9]+/gi, '-').replace(/-+$/, '').toLowerCase(); p.textContent = r.state; st.append(p);
+    const gen = C(r.round + (r.round === 0 ? ' (start)' : '') + (r.best ? ' (best)' : '')); if (r.best) gen.className = 'hc-best';
+    const wide = (t) => { const c = C(t || ''); c.style.minWidth = t ? '22ch' : ''; return c; };
+    tr.append(gen, C(r.agent || 'none (starting program)'), st, C(r.started), C(F(r.agent_minutes), 'num'), C(F(r.recall, 'score'), 'num'), C(F(r.gpu_hours, '2'), 'num'), C(F(r.known_found), 'num'),
+      C(F(r.found_R001), 'num'), C(F(r.found_R002), 'num'), C(F(r.found_R009), 'num'), C(F(r.found_R013), 'num'),
+      C(F(r.gained), 'num'), C(F(r.lost), 'num'), C(F(r.leads), 'num'), wide(r.method), wide(r.check));
+    return tr;
+  }));
+});
+
+dash.draw('r1-events-rows', (tb) => {
+  const g = dash.data('run1_events');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 3, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  if (!g.data.length) { window.hcEmpty(tb, 3, 'Nothing logged yet.'); return; }
+  const C = window.hcCell;
+  tb.replaceChildren(...g.data.map((r) => { const tr = document.createElement('tr'); tr.dataset.key = String(r.n); tr.append(C(r.t), C(r.who || String(r.gen).replace(/^gen0*(\d)/, 'round $1')), C(r.text)); return tr; }));
+});
+</script>
+
+<script>
+// Candidates tab: list, orbit chart and one page per candidate (#c-<key>).
+window.hcView = {tab: 'run1', sel: null, show: 'all', sort: 'stage'};
+window.hcGroup = (c) => (c.stage >= 4 ? 0 : c.stage >= 1 ? 1 : 2);
+window.hcCands = () => {
+  const g = dash.data('candidates'); if (g.status !== 'ok') return null;
+  const v = window.hcView;
+  let rows = g.data.filter((c) => v.show === 'all' || (v.show === 'new' && c.novelty === "not in the MPC's files")
+    || (v.show === 'plausible' && c.stage >= 4) || (v.show === 'out' && c.stage === 0));
+  const by = {stage: (a, b) => b.stage - a.stage || (a.H ?? 99) - (b.H ?? 99) || a.round - b.round || a.rank - b.rank,
+              size: (a, b) => (a.H ?? 99) - (b.H ?? 99) || a.round - b.round || a.rank - b.rank,
+              rank: (a, b) => a.round - b.round || a.rank - b.rank}[v.sort];
+  return [...rows].sort(by);
+};
+window.hcSize = (c) => (c.D20 && c.D05 ? `${c.D20}–${c.D05} km` : '—');
+window.hcName = (c) => `Round ${c.round}, region ${c.region}, rank ${c.rank}`;
+
+window.hcRoute = (name, setLink) => {
+  const v = window.hcView;
+  const cand = /^c-/.test(name) ? name.slice(2) : null;
+  v.tab = cand || name === 'candidates' ? 'candidates' : name === 'data' ? 'data' : name === 'overview' ? 'overview' : 'run1';
+  v.sel = cand;
+  document.querySelectorAll('.hc-tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === v.tab)));
+  document.getElementById('run1').hidden = v.tab !== 'run1';
+  document.getElementById('overview').hidden = v.tab !== 'overview';
+  document.getElementById('candidates').hidden = v.tab !== 'candidates';
+  document.getElementById('data').hidden = v.tab !== 'data';
+  document.getElementById('cand-list').hidden = !!cand;
+  document.getElementById('cand-page').hidden = !cand;
+  window.hcRedraw();
+  if (setLink) { try { dash.setLink(name); } catch (e) {} }
+  if (cand) window.scrollTo(0, 0);
+};
+window.hcRedraw = () => {
+  const L = document.querySelector('[data-draw="cand-rows"]'), D = document.querySelector('[data-draw="cand-detail"]'),
+        N = document.querySelector('[data-draw="cand-count"]'), O = document.querySelector('[data-draw="orbit-chart"]');
+  if (L) window.hcDrawRows(L); if (D) window.hcDrawDetail(D); if (N) window.hcDrawCount(N);
+  if (O && O.__hcOrbit) window.hcDrawOrbit(O, O.__hcOrbit);
+};
+document.querySelectorAll('.hc-tab').forEach((b) => b.addEventListener('click', () => window.hcRoute(b.dataset.tab, true)));
+document.getElementById('cand-back').addEventListener('click', () => window.hcRoute('candidates', true));
+const hcStep = (d) => {
+  const rows = window.hcCands() || []; const i = rows.findIndex((c) => c.key === window.hcView.sel);
+  const c = rows[i + d]; if (c) window.hcRoute('c-' + c.key, true);
+};
+document.getElementById('cand-prev').addEventListener('click', () => hcStep(-1));
+document.getElementById('cand-next').addEventListener('click', () => hcStep(1));
+document.getElementById('cand-show').addEventListener('change', (e) => { window.hcView.show = e.target.value; window.hcRedraw(); });
+document.getElementById('cand-sort').addEventListener('change', (e) => { window.hcView.sort = e.target.value; window.hcRedraw(); });
+
+window.hcDrawCount = (el) => { const r = window.hcCands(); el.textContent = r ? `${r.length} shown` : ''; };
+dash.draw('cand-count', (el) => window.hcDrawCount(el));
+
+window.hcDrawRows = (tb) => {
+  const g = dash.data('candidates');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 13, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  const rows = window.hcCands();
+  if (!rows.length) { window.hcEmpty(tb, 13, 'No candidate matches.'); return; }
+  const C = window.hcCell, f1 = d3.format('.1f'), f2 = d3.format('.2f'), F = (v, f) => (v === null || v === undefined ? '—' : f(v));
+  tb.replaceChildren(...rows.map((c) => {
+    const tr = document.createElement('tr'); tr.dataset.key = c.key; tr.className = 'hc-click';
+    const k = document.createElement('td'); const b = document.createElement('button'); b.className = 'hc-link'; b.textContent = c.key;
+    b.addEventListener('click', (e) => { e.stopPropagation(); window.hcRoute('c-' + c.key, true); }); k.append(b);
+    tr.append(k, C(c.status), C(c.seen_in), C(c.region), C(d3.format('.3f')(c.p), 'num'), C(F(c.nights, String), 'num'),
+      C(F(c.arc_days, d3.format('.0f')), 'num'), C(F(c.H, f2), 'num'), C(F(c.D10, String), 'num'), C(F(c.r, f1), 'num'),
+      C(F(c.a, f1), 'num'), C(F(c.e, f2), 'num'), C(F(c.i, f1), 'num'));
+    tr.addEventListener('click', () => window.hcRoute('c-' + c.key, true));
+    return tr;
+  }));
+};
+dash.draw('cand-rows', (tb) => window.hcDrawRows(tb));
+
+window.hcDrawOrbit = (el, {svg, tip}) => {
+  const g = dash.data('candidates');
+  const W = Math.max(280, el.clientWidth || 600), H = 280, m = {l: 44, r: 14, t: 12, b: 34};
+  svg.attr('viewBox', `0 0 ${W} ${H}`).attr('height', H); svg.selectAll('*').remove();
+  if (g.status !== 'ok') { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text(g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  const pts = (window.hcCands() || []).filter((c) => typeof c.a === 'number' && typeof c.e === 'number');
+  const amax = Math.min(120, Math.max(60, d3.max(pts, (c) => c.a) || 0) + 5);
+  const x = d3.scaleLinear([25, amax], [m.l, W - m.r]), y = d3.scaleLinear([0, 1], [H - m.b, m.t]);
+  const gx = svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.min(10, W / 70)).tickSizeOuter(0));
+  const gy = svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(5).tickSizeOuter(0));
+  [gx, gy].forEach((a) => { a.attr('font-size', null).attr('font-family', null); a.selectAll('path,line').style('stroke', 'var(--cds-chart-axis)'); a.selectAll('text').style('fill', 'var(--cds-text-secondary)').style('font-size', 'var(--cds-font-size-caption)'); });
+  svg.append('text').attr('x', W - m.r).attr('y', H - 4).attr('text-anchor', 'end').text('semimajor axis a (au)');
+  svg.append('text').attr('x', m.l + 4).attr('y', m.t + 10).text('eccentricity e');
+  svg.append('g').selectAll('line').data(y.ticks(5)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', (d) => y(d)).attr('y2', (d) => y(d)).style('stroke', 'var(--cds-chart-grid)');
+  const qline = d3.range(30.1, amax + 0.01, 0.5).map((a) => [a, 1 - 30.1 / a]);
+  svg.append('path').attr('d', d3.line().x((p) => x(p[0])).y((p) => y(p[1]))(qline)).style('fill', 'none').style('stroke', 'var(--cds-chart-reference)').style('stroke-width', 1.5);
+  svg.append('text').attr('x', x(Math.min(amax - 2, 70))).attr('y', y(1 - 30.1 / Math.min(amax - 2, 70)) - 6).attr('text-anchor', 'middle').text('perihelion at Neptune');
+  [[39.4, '3:2'], [47.8, '2:1']].forEach(([a, t]) => {
+    svg.append('line').attr('x1', x(a)).attr('x2', x(a)).attr('y1', m.t).attr('y2', H - m.b).style('stroke', 'var(--cds-chart-reference)').style('stroke-dasharray', '4 4');
+    svg.append('text').attr('x', x(a) + 4).attr('y', m.t + 24).text(t);
+  });
+  const rr = d3.scaleSqrt([50, 400], [4, 11]).clamp(true);
+  const col = (c) => [dash.colors[0], dash.colors[1], 'var(--cds-chart-muted)'][window.hcGroup(c)];
+  svg.append('g').selectAll('circle').data([...pts].sort((a, b) => window.hcGroup(b) - window.hcGroup(a))).join('circle')
+    .attr('cx', (c) => x(c.a)).attr('cy', (c) => y(c.e)).attr('r', (c) => rr(c.D10 || 50))
+    .style('fill', col).style('stroke', 'var(--color-bg)').style('stroke-width', 2).style('cursor', 'pointer')
+    .on('pointerenter pointermove', (ev, c) => window.hcTip(el, tip, ev, [c.key, c.status, `a ${d3.format('.1f')(c.a)} au, e ${d3.format('.2f')(c.e)}, i ${d3.format('.1f')(c.i)}°`, `H ${d3.format('.2f')(c.H)}, about ${window.hcSize(c)}`]))
+    .on('pointerleave', () => { tip.hidden = true; })
+    .on('click', (ev, c) => window.hcRoute('c-' + c.key, true));
+  if (!pts.length) svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No orbit fitted yet');
+};
+dash.draw('orbit-chart', {
+  mount(el) {
+    const svg = d3.select(el).append('svg').attr('role', 'img').attr('aria-label', 'Semimajor axis against eccentricity for each candidate');
+    const tip = document.createElement('div'); tip.className = 'hc-tip'; tip.hidden = true; el.append(tip);
+    el.__hcOrbit = {svg, tip}; return el.__hcOrbit;
+  },
+  update(el, st) { window.hcDrawOrbit(el, st); }
+});
+
+window.hcDrawDetail = (el) => {
+  const sel = window.hcView.sel; if (!sel) { el.replaceChildren(); return; }
+  const g = dash.data('candidates');
+  if (g.status !== 'ok') { el.textContent = g.status === 'loading' ? 'Loading' : 'Failed to load'; return; }
+  const c = g.data.find((r) => r.key === sel);
+  const page = document.getElementById('cand-page'); page.querySelectorAll('[id^="c-"]').forEach((n) => n.removeAttribute('id'));
+  if (!c) { el.textContent = 'No candidate by that name.'; return; }
+  const rows = window.hcCands() || [], i = rows.findIndex((r) => r.key === sel);
+  document.getElementById('cand-prev').disabled = i <= 0; document.getElementById('cand-next').disabled = i < 0 || i >= rows.length - 1;
+  const E = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+  const mark = (n, field) => { n.dataset.source = 'candidates'; n.dataset.field = field; n.dataset.where = 'key=' + encodeURIComponent(c.key); return n; };
+  const F = (v, f) => (v === null || v === undefined ? '—' : f ? d3.format(f)(v) : String(v));
+  const root = E('section', 'hc-panel'); root.id = 'c-' + c.key;
+  const head = E('div', 'hc-head');
+  const h = E('h2', null, `Candidate ${c.key}`); h.style.fontSize = 'var(--cds-font-size-title)'; h.style.fontFamily = 'var(--font-anthropic-serif)'; h.style.fontWeight = '400';
+  const sub = E('p', 'hc-lede'); sub.append(`${window.hcName(c)}: found by round ${c.round}'s program at confidence `, mark(E('b', null, F(c.p, '.3f')), 'p'),
+    c.n_rounds > 1 ? `, and again in ${c.n_rounds - 1} later round${c.n_rounds > 2 ? 's' : ''} (${c.seen_in}).` : '.');
+  const st = E('p', 'hc-sub'); st.append('Status: ', mark(E('b', null, c.status), 'status'));
+  head.append(h, sub, st);
+  const tiles = E('div', 'hc-tiles');
+  const tile = (label, big, of) => { const t = E('div', 'hc-tile'); t.append(E('span', 'hc-label', label), big, E('span', 'hc-of', of)); return t; };
+  const sz = E('span', 'hc-big'); sz.append(mark(E('span', null, F(c.D20)), 'D20'), '–', mark(E('span', null, F(c.D05)), 'D05'), ' km');
+  tiles.append(
+    tile('Size', sz, `${F(c.D10)} km at albedo 0.10; range for albedo 0.20 to 0.05`),
+    tile('Absolute magnitude H', mark(E('span', 'hc-big', F(c.H, '.2f')), 'H'), `± ${F(c.H_spread, '.2f')} across its detections`),
+    tile('Distance from the Sun', (() => { const b = E('span', 'hc-big'); b.append(mark(E('span', null, F(c.r, '.1f')), 'r'), ' au'); return b; })(), 'when DECam saw it'),
+    tile('Orbit', (() => { const b = E('span', 'hc-big'); b.append('a ', mark(E('span', null, F(c.a, '.1f')), 'a')); return b; })(), `e ${F(c.e, '.2f')}, i ${F(c.i, '.1f')}°; ` + ((c.arc_days || 0) > 300 ? `from a ${d3.format('.1f')(c.arc_days / 365.25)}-year arc` : 'loose from one season')));
+  // where its orbit runs
+  const two = E('div', 'hc-two');
+  const runSec = E('section', 'hc-sec'); runSec.append(E('h2', null, 'Where its orbit runs'),
+    E('p', 'hc-sub', 'Distance from the Sun along its orbit, from closest (perihelion) to farthest (aphelion), with Neptune and the main Kuiper belt for scale.'));
+  const rc = E('div', 'hc-chart'); rc.style.minHeight = '110px'; rc.dataset.source = 'candidates'; runSec.append(rc);
+  const imgSec = E('section', 'hc-sec'); imgSec.append(E('h2', null, 'Image check'),
+    E('p', 'hc-sub', 'Its orbit says where it should be in each of this region\'s exposures within 60 days of its detections, where it would be bright enough to see. The exposures the program built it from always match; the test is the others. As a control, the same count 30″ away.'));
+  const ic = E('div', 'hc-chart'); ic.style.minHeight = '120px'; ic.dataset.source = 'candidates'; imgSec.append(ic);
+  two.append(runSec, imgSec);
+  // checks
+  const chk = E('section', 'hc-sec'); chk.append(E('h2', null, 'Checks'));
+  const ol = E('ol', 'hc-checks');
+  const step = (n, what, ...parts) => { const li = E('li'); const t = E('div'); const r = E('div', 'hc-res'); r.append(...parts); t.append(E('div', 'hc-what', what), r); li.append(E('span', 'hc-step', n), t); return li; };
+  const M = (text, field) => mark(E('span', null, text), field);
+  ol.append(step('1', "The MPC's files: is any catalogued body, of any size, along this path?", M(c.novelty, 'novelty')),
+    step('2', "The region's exposures the program did not use: is it there, where its orbit predicts?", M(c.image_check, 'image_check'),
+      ...(c.extra === null || c.extra === undefined ? [] : [`: a source in ${F(c.extra_found)} of ${F(c.extra)} such exposures; at the places 30″ away, ${F(c.null_hits)} of ${F(c.expected)}`])),
+    step('3', 'Images the program never used (other DECam programs, CFHT)', M(c.other_images, 'other_images')),
+    step('4', 'Follow-up by OBSERVER_NAME', ...(c.observer ? ['sent ', M(c.observer, 'observer')] : [c.stage >= 4 ? 'in the next batch of ten' : 'only after checks 1 and 2 pass'])));
+  chk.append(ol);
+  const ev = E('section', 'hc-sec'); ev.append(E('h2', null, 'The linkage'));
+  const dl = E('dl', 'hc-kv');
+  const kv = (k, v, field) => { const d = E('div'); d.append(E('dt', null, k), field ? mark(E('dd', null, v), field) : E('dd', null, v)); dl.append(d); };
+  kv('Detections', F(c.detections), 'detections'); kv('Nights', F(c.nights), 'nights'); kv('Arc', `${F(c.arc_days, '.0f')} days`, 'arc_days');
+  kv('Orbit fit rms', `${F(c.rms, '.3f')}″`, 'rms'); kv('Median S/N per detection', F(c.snr_med, '.1f'), 'snr_med');
+  kv('Perihelion, aphelion', `${F(c.q, '.1f')}, ${F(c.Q, '.1f')} au`); kv('Region', c.region, 'region'); kv('Rank in the scored list', F(c.rank), 'rank');
+  ev.append(dl);
+  root.append(head, tiles, two, chk, ev);
+  el.replaceChildren(root);
+  // orbit-range strip
+  const W = Math.max(260, rc.clientWidth || 500), H2 = 96, m = {l: 10, r: 14};
+  const Qmax = Math.max(60, (c.Q || 50) + 5), x = d3.scaleLinear([0, Qmax], [m.l, W - m.r]);
+  const s1 = d3.select(rc).append('svg').attr('viewBox', `0 0 ${W} ${H2}`).attr('width', '100%').attr('height', H2).attr('role', 'img').attr('aria-label', 'Range of distance from the Sun along the orbit');
+  const ax = s1.append('g').attr('transform', `translate(0,${H2 - 22})`).call(d3.axisBottom(x).ticks(Math.min(8, W / 60)).tickSizeOuter(0));
+  ax.attr('font-size', null).attr('font-family', null); ax.selectAll('path,line').style('stroke', 'var(--cds-chart-axis)'); ax.selectAll('text').style('fill', 'var(--cds-text-secondary)').style('font-size', 'var(--cds-font-size-caption)');
+  s1.append('rect').attr('x', x(39)).attr('width', x(48) - x(39)).attr('y', 18).attr('height', 40).style('fill', 'var(--cds-chart-grid)');
+  s1.append('text').attr('x', (x(39) + x(48)) / 2).attr('y', 14).attr('text-anchor', 'middle').text('Kuiper belt');
+  s1.append('line').attr('x1', x(30.1)).attr('x2', x(30.1)).attr('y1', 18).attr('y2', 58).style('stroke', 'var(--cds-chart-reference)').style('stroke-dasharray', '4 3');
+  s1.append('text').attr('x', x(30.1) - 4).attr('y', 14).attr('text-anchor', 'end').text('Neptune');
+  if (c.q && c.Q) {
+    s1.append('line').attr('x1', x(c.q)).attr('x2', x(c.Q)).attr('y1', 38).attr('y2', 38).style('stroke', dash.colors[0]).style('stroke-width', 4).style('stroke-linecap', 'round');
+    s1.append('circle').attr('cx', x(c.r)).attr('cy', 38).attr('r', 6).style('fill', dash.colors[0]).style('stroke', 'var(--color-bg)').style('stroke-width', 2);
+    s1.append('text').attr('x', x(c.r)).attr('y', 70 - 22 + 18).attr('text-anchor', 'middle').text(`seen at ${d3.format('.1f')(c.r)} au`).style('fill', 'var(--cds-text-secondary)');
+  }
+  // image-check bars
+  const W2 = Math.max(260, ic.clientWidth || 500), bars = [['Predicted exposures it was built from', (c.expected ?? 0) - (c.extra ?? 0), 'var(--cds-chart-muted)'],
+    ['Other predicted exposures', c.extra, 'var(--cds-chart-muted)'], ['… with a source there', c.extra_found, dash.colors[0]],
+    ['Places 30″ away with a source', c.null_hits, dash.colors[1]]];
+  const nmax = Math.max(1, c.expected || 0), lw = Math.min(210, W2 * 0.48), bx = d3.scaleLinear([0, nmax], [lw, W2 - 34]);
+  const s2 = d3.select(ic).append('svg').attr('viewBox', `0 0 ${W2} 136`).attr('width', '100%').attr('height', 136).attr('role', 'img').attr('aria-label', 'Image check counts');
+  if (c.extra === null || c.extra === undefined) { s2.append('text').attr('x', 0).attr('y', 20).text('Not run yet'); return; }
+  bars.forEach(([lab, v, colr], k) => {
+    const yy = 8 + k * 32;
+    s2.append('text').attr('x', 0).attr('y', yy + 13).text(lab).style('fill', 'var(--cds-text-secondary)');
+    s2.append('rect').attr('x', lw).attr('y', yy).attr('height', 18).attr('width', Math.max(0, bx(v || 0) - lw)).attr('rx', 4).style('fill', colr);
+    s2.append('text').attr('x', bx(v || 0) + 6).attr('y', yy + 13).text(F(v)).style('fill', 'var(--color-fg)');
+  });
+};
+dash.draw('cand-detail', (el) => window.hcDrawDetail(el));
+
+// links: #run1 (default), #overview (the earlier run), #candidates, #c-<key>, #data
+const hcStart = () => { const h = location.hash.slice(1); if (h === 'candidates' || h === 'overview' || h === 'run1' || h === 'data' || /^c-/.test(h)) window.hcRoute(h, false); };
+window.addEventListener('hashchange', hcStart);
+hcStart();
+</script>
+
+<script>
+// Data tab
+dash.calc('data_totals', {inputs: ['data_regions'], title: 'Data totals', description: 'Sums over the three sealed regions.',
+  fn: (data_regions) => [{exposures: d3.sum(data_regions, (r) => r.exposures), detections: d3.sum(data_regions, (r) => r.detections),
+    det_gb: d3.sum(data_regions, (r) => r.det_gb), images_tb: d3.sum(data_regions, (r) => r.images_tb), known_findable: d3.sum(data_regions, (r) => r.known_findable)}]});
+dash.draw('data-rows', (tb) => {
+  const g = dash.data('data_regions');
+  if (g.status !== 'ok') { window.hcEmpty(tb, 9, g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+  const C = window.hcCell, F = window.hcFmt;
+  tb.replaceChildren(...g.data.map((r) => { const tr = document.createElement('tr'); tr.dataset.key = r.region;
+    tr.append(C(r.region), C(r.centre), C(F(r.area_deg2), 'num'), C(r.years), C(F(r.exposures), 'num'), C(F(r.detections), 'num'),
+      C(F(r.det_gb, '1'), 'num'), C(F(r.images_tb), 'num'), C(F(r.known_findable), 'num')); return tr; }));
+});
+dash.draw('year-chart', {
+  mount(el) {
+    const svg = d3.select(el).append('svg').attr('role', 'img').attr('aria-label', 'Exposures per year in each region');
+    const tip = document.createElement('div'); tip.className = 'hc-tip'; tip.hidden = true; el.append(tip);
+    return {svg, tip};
+  },
+  update(el, {svg, tip}) {
+    const g = dash.data('data_years');
+    const W = Math.max(280, el.clientWidth || 600), H = 240, m = {l: 44, r: 10, t: 10, b: 26};
+    svg.attr('viewBox', `0 0 ${W} ${H}`).attr('height', H); svg.selectAll('*').remove();
+    if (g.status !== 'ok') { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text(g.status === 'loading' ? 'Loading' : 'Failed to load'); return; }
+    const rows = g.data, years = d3.range(d3.min(rows, (r) => r.year), d3.max(rows, (r) => r.year) + 1), regs = ['A', 'B', 'C'];
+    const x0 = d3.scaleBand(years, [m.l, W - m.r]).paddingInner(0.2), x1 = d3.scaleBand(regs, [0, x0.bandwidth()]).paddingInner(0.12);
+    const y = d3.scaleLinear([0, d3.max(rows, (r) => r.exposures) || 1], [H - m.b, m.t]).nice();
+    const gx = svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x0).tickValues(years.filter((v, i) => W > 500 || i % 2 === 0)).tickSizeOuter(0));
+    const gy = svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(5).tickSizeOuter(0));
+    [gx, gy].forEach((a) => { a.attr('font-size', null).attr('font-family', null); a.selectAll('path,line').style('stroke', 'var(--cds-chart-axis)'); a.selectAll('text').style('fill', 'var(--cds-text-secondary)').style('font-size', 'var(--cds-font-size-caption)'); });
+    svg.append('g').selectAll('line').data(y.ticks(5)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', (d) => y(d)).attr('y2', (d) => y(d)).style('stroke', 'var(--cds-chart-grid)');
+    svg.append('g').selectAll('rect').data(rows).join('rect')
+      .attr('x', (r) => x0(r.year) + x1(r.region)).attr('width', x1.bandwidth()).attr('y', (r) => y(r.exposures)).attr('height', (r) => Math.max(0, y(0) - y(r.exposures)))
+      .attr('rx', 2).style('fill', (r) => dash.colors[regs.indexOf(r.region)])
+      .on('pointerenter pointermove', (ev, r) => window.hcTip(el, tip, ev, [`Region ${r.region}, ${r.year}`, `${r.exposures} exposures on ${r.nights} nights`, `median 5σ depth ${r.m5_median ?? '—'} mag`]))
+      .on('pointerleave', () => { tip.hidden = true; });
+  }
+});
+</script>

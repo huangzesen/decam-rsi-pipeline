@@ -1,0 +1,30 @@
+--- history/gen091/submission/stackd/finder.py	2026-11-05 06:01:44
++++ submission/stackd/finder.py	2026-11-05 14:24:52
+@@ -69,6 +69,27 @@
+     F = torch.nn.functional
+     sdir = a.scenario
+     rows = list(csv.DictReader(open(os.path.join(sdir, "exposures.csv"))))
++    # gen 92: exposures with an EMPTY magzero (failed / non-photometric CP calibration) gave ~65 % ceiling-pixel junk
++    # on scen03 night 0 (gen091).  When they are a small minority, stackd drops them; the linker still uses them.
++    # Guard: <= NZP_FRAC of the exposures, and >= 4 exposures on >= 3 nights remain.  TNO_DROPNZP=0 restores gen085.
++    if os.environ.get("TNO_DROPNZP", "1") != "0":
++        try:
++            def _nzp(r):
++                v = str(r.get("magzero", "")).strip().lower()
++                if v in ("", "nan", "none"):
++                    return True
++                try:
++                    return not math.isfinite(float(v))
++                except Exception:
++                    return True
++            _r = [r for r in rows if not _nzp(r)]
++            _nn = len({math.floor(float(r["mjd_mid"]) - 0.5) for r in _r})
++            _fr = float(os.environ.get("TNO_NZP_FRAC", "0.25"))
++            if 0 < len(rows) - len(_r) <= _fr * len(rows) and len(_r) >= 4 and _nn >= 3:
++                print(f"[stackd] dropping {len(rows) - len(_r)} empty-magzero exposures of {len(rows)}", flush=True)
++                rows = _r
++        except Exception as ex_:
++            print("[stackd] empty-magzero filter failed", ex_, flush=True)
+     meta = json.load(open(os.path.join(sdir, "meta.json")))
+     t_all = np.array([float(r["mjd_mid"]) for r in rows])
+     night_all = np.floor(t_all - 0.5).astype(int)

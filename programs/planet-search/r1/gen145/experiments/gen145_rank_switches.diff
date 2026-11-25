@@ -1,0 +1,63 @@
+--- history/gen143/submission/finder.py	2026-11-08 22:16:24
++++ submission/finder.py	2026-11-09 00:57:17
+@@ -21,6 +21,7 @@
+ # gen 14c: rank-balanced p for the global top-25N cut (see NOTES.md).  p' = 1 - (1 - p)(1 - Q0 exp(-rank / RQ)).
+ RANK_Q0 = float(os.environ.get("TNO_RANKQ0", "0.7"))  # gen 41: was 0.25
+ RANK_R = float(os.environ.get("TNO_RANKR", "25"))
++RANK_VM = float(os.environ.get("TNO_RANKVM", "0"))   # gen 145: exponent on the vet multiplier in the rank bonus (0 = gen143)
+ # gen 20: interleave stack-only candidates with the linker's weak tail (see NOTES.md).
+ ILEAVE = int(float(os.environ.get("TNO_ILEAVE", "1") or 0))          # stack-only candidates per linker-tail candidate (0 = off)
+ P_STRONG = float(os.environ.get("TNO_PSTRONG", "0.8"))  # candidates at or above this p keep the top ranks
+@@ -178,7 +179,11 @@
+     for r, c in enumerate(cs):
+         p = min(max(float(c["p"]), 0.0), 1.0)
+         q = RANK_Q0 * math.exp(-r / RANK_R)
++        if RANK_VM and c.get("vm") is not None:   # gen 145: rank bonus scaled by the vet/CNN multiplier
++            q *= min(1.0, max(0.0, float(c["vm"])) ** RANK_VM)
+         out.append(dict(c, p=1 - (1 - p) * (1 - q)))
++    if RANK_VM:
++        out.sort(key=lambda c: -float(c["p"]))
+     return out
+ 
+ 
+@@ -247,6 +252,8 @@
+             if m < 1.0:
+                 nd += 1
+             p = p * m
++            out.append(dict(c, p=p, vet=f, vm=m))
++            continue
+         out.append(dict(c, p=p, vet=f))
+     log(f"vet: {nd} of {len(cs)} candidates demoted")
+     return vet_promote(out) if PROM else out
+@@ -267,6 +274,8 @@
+ # linker-only rows (src "L") were built from single-exposure detections at ~5 sigma in these same exposures, so their
+ # forced S/N is selection-biased upwards (sparse scenarios: every exposure); they need a higher zlbno to be promoted.
+ PROM_DZL = float(os.environ.get("TNO_VPROM_DZL", "2"))
++PROM_CNN = float(os.environ.get("TNO_VPROM_CNN", "-1e9"))   # gen 145: min CNN logit for promotion (-1e9 = gen143)
++PROM_CF = int(float(os.environ.get("TNO_VPROM_CF", "0") or 0))   # gen 145: 1 = promotion target x cnn_factor
+ 
+ 
+ def prom_target(f, src=None):
+@@ -280,7 +289,21 @@
+     z0 = PROM_Z0 + (PROM_DZL if src == "L" else 0.0)
+     if z < z0 or npos < PROM_NP or zo > max(3.0, 0.5 * z) or chi > PROM_CHI * max(zon, 1.0) ** 2 + 4.0:
+         return None
+-    return PROM_P0 + (PROM_P1 - PROM_P0) * min(1.0, (z - z0) / max(PROM_Z1 - PROM_Z0, 1e-6))
++    # gen 145 (TNO_VPROM_CNN): the night-stamp CNN gates promotion.  A row whose stamps do not look like a point source
++    # moving along the track (cnn logit < PROM_CNN) is not promoted, and a promoted row's target is scaled by its
++    # cnn_factor, so high-zlbno / low-CNN junk (gen143 NOTES: Q ranks 18, 19, 21) no longer undoes the CNN demotion.
++    cf = 1.0
++    if PROM_CNN > -1e8 and VCNN:
++        try:
++            x = float(f.get("cnn"))
++        except Exception:
++            x = float("nan")
++        if math.isfinite(x):
++            if x < PROM_CNN:
++                return None
++            if PROM_CF:
++                cf = cnn_factor(f)
++    return cf * (PROM_P0 + (PROM_P1 - PROM_P0) * min(1.0, (z - z0) / max(PROM_Z1 - PROM_Z0, 1e-6)))
+ 
+ 
+ def vet_promote(cs):

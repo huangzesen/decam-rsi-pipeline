@@ -1,0 +1,57 @@
+diff -ru -x __pycache__ $RSI_SANDBOX/r1/gen115/workspace/submission/stackd/fstk.py $RSI_SANDBOX/r1/gen115/tmp/armD/submission/stackd/fstk.py
+--- $RSI_SANDBOX/r1/gen115/workspace/submission/stackd/fstk.py	2026-11-06 23:48:46
++++ $RSI_SANDBOX/r1/gen115/tmp/armD/submission/stackd/fstk.py	2026-11-07 02:18:28
+@@ -36,8 +36,13 @@
+     # TNO_FSTK_RS=0 reproduces gen108 exactly.  RPOOL = pool size factor (peaks rescored = RPOOL x NPK, best NPK kept).
+     RS = os.environ.get("TNO_FSTK_RS", "1") == "1"
+     RCLIP = float(os.environ.get("TNO_FSTK_RCLIP", "3.0"))
+-    RPOOL = float(os.environ.get("TNO_FSTK_RPOOL", "1.0") or 1.0)
++    RPOOL = float(os.environ.get("TNO_FSTK_RPOOL", "3.0") or 1.0)
+     RSUB = int(os.environ.get("TNO_FSTK_RSUB", "2") or 2)       # sub-steps per half unit: grid -0.5..0.5 step 0.5/RSUB
++    # gen 115 (arm D): sub-cell tolerant coarse search.  DIL = max dilation of each night co-add of the COARSE search
++    # (Dm only; the rescore co-adds Dm3 stay undilated; default "2" + RPOOL 3): "0" off (shipped), "3" 3x3, "p" plus-shaped, "2" 2x2.
++    # NMS = peak local-max window (shipped 9).
++    DIL = os.environ.get("TNO_FSTK_DIL", "2").strip().lower()
++    NMS = int(os.environ.get("TNO_FSTK_NMS", "9") or 9) | 1
+     if RS and DCLIP <= 0:
+         RS = False
+     probes = []
+@@ -154,6 +159,20 @@
+                     fr_ *= float(wsel[k_])
+                 Dm[int(gid_[k_])] += fr_
+                 del fr_, rows_, src_
++            if DIL in ("3", "p", "2"):
++                for k_ in range(K):
++                    x_ = Dm[k_].float()
++                    cov_ = x_ != 0
++                    if DIL == "3":
++                        y_ = F.max_pool2d(x_[None, None], 3, 1, 1)[0, 0]
++                    elif DIL == "2":
++                        y_ = F.max_pool2d(F.pad(x_[None, None], (0, 1, 0, 1), value=-1e4), 2, 1)[0, 0]
++                    else:
++                        y_ = x_.clone()
++                        y_[1:] = torch.maximum(y_[1:], x_[:-1]); y_[:-1] = torch.maximum(y_[:-1], x_[1:])
++                        y_[:, 1:] = torch.maximum(y_[:, 1:], x_[:, :-1]); y_[:, :-1] = torch.maximum(y_[:, :-1], x_[:, 1:])
++                    Dm[k_] = torch.where(cov_, y_, x_).half()
++                    del x_, y_, cov_
+             # zero-median co-adds on covered px (max-pooled S/N is biased positive)
+             for k_ in range(K):
+                 v_ = Dm[k_, ::3, ::3].float(); v_ = v_[v_ != 0]
+@@ -228,7 +247,7 @@
+             # peaks
+             bs = best.reshape(Hc, WD)[:, :Wc].float() * qn
+             del best
+-            pk = (bs == F.max_pool2d(bs[None, None], 9, 1, 4)[0, 0]) & (bs > PTH)
++            pk = (bs == F.max_pool2d(bs[None, None], NMS, 1, NMS // 2)[0, 0]) & (bs > PTH)
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
+             nab = [int((sc > z_).sum()) for z_ in (5.0, 6.0, 7.0)]
+@@ -253,6 +272,8 @@
+                 hh = bi_.cpu().numpy()
+                 del OFF_t
+             yy, xx, sc = yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()
++            if DIL == "2":   # a 2x2 (forward) dilated peak at x covers true positions x..x+1: centre the rescore at +0.5
++                xx = xx + 0.5; yy = yy + 0.5
+             fi = fi0 + len(frames_out)
+             rres = None
+             t_rs0 = time.time()

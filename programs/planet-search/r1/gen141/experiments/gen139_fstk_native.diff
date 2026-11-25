@@ -1,0 +1,171 @@
+--- tmp/base138/stackd/fstk.py	2026-11-08 15:24:17
++++ workspace/submission/stackd/fstk.py	2026-11-08 16:11:22
+@@ -60,6 +60,14 @@
+     RSUB = int(os.environ.get("TNO_FSTK_RSUB", "2") or 2)       # sub-steps per half unit: grid -0.5..0.5 step 0.5/RSUB
+     if RS and DCLIP <= 0:
+         RS = False
++    # gen 139 (TNO_FSTK_NAT, default 1; 0 = gen138): native-resolution re-score.  The best NATN clip-3 re-scored peaks of a
++    # slice are scored once more on the UNPOOLED 1" S/N maps, every frame at its own time, along a continuous track mapped
++    # through the exact ray geometry (no 2x2 max-pool, no nearest-cell warp, no per-co-add integer shift rounding), over a
++    # local grid of +-1 cell position (0.5 steps) x +-1 dv velocity (0.25 steps), then +-0.25 cell x +-0.125 dv around the best; the best NPK are kept
++    # (rows carry the refined position / velocity).  (TNO_FSTK_NPR/NPS/NVR/NVS set the first grid; TNO_FSTK_NATN the pool, TNO_FSTK_NCLIP the clip.)
++    NAT = RS and os.environ.get("TNO_FSTK_NAT", "1") != "0"
++    NATN = int(float(os.environ.get("TNO_FSTK_NATN", "2000") or 0))
++    NCLIP = float(os.environ.get("TNO_FSTK_NCLIP", "3.0") or 3.0)
+     probes = []
+     PROBE_OLD = os.environ.get("TNO_FSTK_PROBE_OLD", "0") == "1"   # gen 127: 1 = gen126's (wrong at d != r) probe position
+     try:
+@@ -142,6 +150,7 @@
+     log(f"fstk: {N} frames -> {K} co-adds, {len(dg)} distances {DMIN}-{DMAX} au, map {W2}x{H2}, "
+         f"{deadline - (time.time() - T0):.0f}s")
+     ntot = 0; tconv = 0.0
++    nat_mu = [None]   # gen 139: per-frame medians of the clipped 1" maps (computed once, lazily)
+     nfail = 0   # gen 114: a failing slice is skipped (continue); stop only after 3 failures in a row
+     pstat = []
+     # gen 127 (TNO_FSTK_ADAPT, default 0 = gen126, NOT shipped: lost the threshold body B9 in a paired run, see NOTES): coverage-adaptive distance grid.  After ADN slices, predict the
+@@ -470,7 +479,52 @@
+                 log(f"fstk rescore d={d:.2f} ({time.time() - t_rs0:.1f}s): {len(sc)} peaks, clip{RCLIP} exact max {s0_.max():.2f}, local max {s2_.max():.2f}, "
+                     f"median lift {np.median(s2_ - s0_):.2f}, kept {len(o2_)}, "
+                     f"overlap with old top {len(set(o2_.tolist()) & set(range(min(NPK, len(sc)))))}")
+-                for j in o2_:
++                nat_ = None
++                if NAT and NATN > 0:
++                    try:
++                        t_n0 = time.time()
++                        # cost guard: the native pass loops over all N frames; shrink the pool for dense scenarios
++                        natn_ = max(NPK, min(NATN, int(NATN * 24 / max(N, 24))))
++                        on_ = np.argsort(-s2_)[:max(natn_, NPK)]
++                        on_ = on_[s2_[on_] > -1e8]
++                        if len(on_):
++                            if nat_mu[0] is None:
++                                nat_mu[0] = _nat_med(torch, maps, NCLIP)
++                            fs_, fex_, fey_, fevx_, fevy_ = _natscore(
++                                torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
++                                xx[on_] + ex_[on_], yy[on_] + ey_[on_], VX[hh[on_]] + evx_[on_], VY[hh[on_]] + evy_[on_],
++                                dv, NCLIP, nat_mu[0])
++                            okn_ = np.isfinite(fs_) & (fs_ < 1e3)
++                            if okn_.any():
++                                fsn_ = np.where(okn_, fs_, -1e9)
++                                # gen 139 blend (TNO_FSTK_NBLEND, default 1): a peak keeps its clip-3 score (scaled to
++                                # the native scale by the ratio of the two top-NPK medians) when that is higher, with its
++                                # clip-3 position / velocity, so bodies the native grid misses are not dropped.
++                                if os.environ.get("TNO_FSTK_NBLEND", "1") != "0":
++                                    s2o_ = s2_[on_]
++                                    kk_ = float(np.median(np.sort(fsn_[okn_])[::-1][:NPK])) / max(float(np.median(np.sort(s2o_)[::-1][:NPK])), 1e-6)
++                                    kk_ = kk_ if (np.isfinite(kk_) and 0.5 < kk_ < 3.0) else 1.0
++                                    use2_ = (kk_ * s2o_ > fsn_) & (s2o_ > -1e8)
++                                    fs_ = np.where(use2_, kk_ * s2o_, fs_); okn_ = okn_ | use2_
++                                    fex_ = np.where(use2_, 0.0, fex_); fey_ = np.where(use2_, 0.0, fey_)
++                                    fevx_ = np.where(use2_, 0.0, fevx_); fevy_ = np.where(use2_, 0.0, fevy_)
++                                    fsn_ = np.where(okn_, fs_, -1e9)
++                                o3_ = np.argsort(-fsn_)[:NPK]
++                                o3_ = o3_[okn_[o3_]]
++                                nat_ = (on_, fs_, fex_, fey_, fevx_, fevy_, o3_)
++                                log(f"fstk native d={d:.2f} ({time.time() - t_n0:.1f}s): {len(on_)} peaks, max {fs_[o3_].max():.2f}, "
++                                    f"kept {len(o3_)}, overlap with clip{RCLIP} kept {len(set(on_[o3_].tolist()) & set(o2_.tolist()))}")
++                    except Exception as ex:
++                        log("fstk native rescore failed:", repr(ex)[:200]); nat_ = None
++                if nat_ is not None:
++                    on_, fs_, fex_, fey_, fevx_, fevy_, o3_ = nat_
++                    for q_ in o3_:
++                        j = on_[q_]
++                        px = (xx[j] + ex_[j] + fex_[q_] + P - (WD - 1) / 2) * SP; py = (yy[j] + ey_[j] + fey_[q_] + P - (HD - 1) / 2) * SP
++                        rows_out.append((float(fs_[q_]), d, (VX[hh[j]] + evx_[j] + fevx_[q_]) * SP,
++                                         (VY[hh[j]] + evy_[j] + fevy_[q_]) * SP, px, py, fi))
++                else:
++                  for j in o2_:
+                     px = (xx[j] + ex_[j] + P - (WD - 1) / 2) * SP; py = (yy[j] + ey_[j] + P - (HD - 1) / 2) * SP
+                     rows_out.append((float(s2_[j]), d, (VX[hh[j]] + evx_[j]) * SP, (VY[hh[j]] + evy_[j]) * SP, px, py, fi))
+                 s2sorted = np.sort(s2_)[::-1][:NPK]
+@@ -672,3 +726,91 @@
+         best[sl] = m_.cpu().numpy(); arg[sl] = a_.cpu().numpy(); exact[sl] = acc[:, i0].cpu().numpy()
+         del acc
+     return best, EX[arg], EY[arg], EVX[arg], EVY[arg], exact
++
++
++def _nat_med(torch, maps, clip):
++    """gen 139: per-frame median of the clipped 1" S/N map over covered (non-zero) pixels (subsampled)."""
++    mu = np.zeros(maps.shape[0])
++    for n in range(maps.shape[0]):
++        try:
++            v = maps[n, ::7, ::7].float()
++            v = v[v != 0]
++            if v.numel() > 100:
++                mu[n] = float(torch.median(v.clamp(-clip, clip)))
++        except Exception:
++            mu[n] = 0.0
++    return mu
++
++
++def _natscore(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, dv, clip, mu):
++    """gen 139 (TNO_FSTK_NAT): native-resolution re-score of fstk peaks.  xx, yy: kernel coords (canvas col/row - P,
++    sub-cell), vx, vy: velocity in canvas cells/day, at time tref (dts = frame time - tref).  Each frame n is sampled on the
++    unpooled 1" map at the track's exact position (ray from the frame's observer to radius d, as the warp does; linearised
++    per peak and frame around the track point), nearest 1" pixel, clipped at +-clip, minus the frame median, depth-weighted
++    as the fstk co-adds.  Two local grids: (1) position +-PR cells in PS steps x velocity +-VR dv in VS steps (the coarse
++    and clip-3 velocity is often ~1 dv off, which the 2" pooled statistic cannot see but the 1" one can); (2) around the best,
++    position +-0.25 cell x velocity +-0.125 dv, 3 steps each.  Returns (best score, ex, ey, evx, evy) numpy arrays."""
++    PR = float(os.environ.get("TNO_FSTK_NPR", "1.0")); PS = float(os.environ.get("TNO_FSTK_NPS", "0.5"))
++    VR = float(os.environ.get("TNO_FSTK_NVR", "1.0")); VS = float(os.environ.get("TNO_FSTK_NVS", "0.25"))
++    gp = np.arange(-round(PR / PS), round(PR / PS) + 1) * PS
++    gv = np.arange(-round(VR / VS), round(VR / VS) + 1) * VS * dv
++    xx = np.asarray(xx, float); yy = np.asarray(yy, float); vx = np.asarray(vx, float); vy = np.asarray(vy, float)
++    b1, ex1, ey1, evx1, evy1 = _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
++                                        xx, yy, vx, vy, clip, mu, gp, gv)
++    g2p = np.array([-0.25, 0.0, 0.25]) * (PS / 0.5); g2v = np.array([-0.125, 0.0, 0.125]) * (VS / 0.25) * dv
++    b2, ex2, ey2, evx2, evy2 = _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P,
++                                        xx + ex1, yy + ey1, vx + evx1, vy + evy1, clip, mu, g2p, g2v)
++    return b2, ex1 + ex2, ey1 + ey2, evx1 + evx2, evy1 + evy2
++
++
++def _natgrid(torch, dev, maps, obs, dts, wsel, DW, d, TD, TF0, x0, y0, PIX, SP, WD, HD, P, xx, yy, vx, vy, clip, mu, gp, gv):
++    """gen 139: one local-grid pass of _natscore (position offsets gp cells, velocity offsets gv cells/day)."""
++    N, H, W = maps.shape
++    n = len(xx)
++    EX, EY, EVX, EVY = [a.ravel() for a in np.meshgrid(gp, gp, gv, gv, indexing="ij")]
++    G = len(EX)
++    f32 = torch.float32
++    w = np.asarray(wsel, float) if DW else np.ones(N)
++    norm = 1.0 / math.sqrt(max(float((w ** 2).sum()), 1e-9))
++    gx0 = (xx + P - (WD - 1) / 2) * SP
++    gy0 = (yy + P - (HD - 1) / 2) * SP
++    TDt = torch.tensor(np.asarray(TD, float), dtype=torch.float64)
++    TFt = torch.tensor(np.asarray(TF0, float), dtype=torch.float64)
++    EX_t = torch.tensor(EX, dtype=f32, device=dev)[None]; EY_t = torch.tensor(EY, dtype=f32, device=dev)[None]
++    EVX_t = torch.tensor(EVX, dtype=f32, device=dev)[None]; EVY_t = torch.tensor(EVY, dtype=f32, device=dev)[None]
++    best = np.full(n, -1e9); arg = np.zeros(n, np.int64)
++    CH = max(1, int(2_000_000 // G))
++    flat = maps.reshape(N, -1)
++    for c0 in range(0, n, CH):
++        sl = slice(c0, min(n, c0 + CH)); m = sl.stop - sl.start
++        acc = torch.zeros((m, G), dtype=f32, device=dev)
++        for k in range(N):
++            if w[k] <= 0:
++                continue
++            dt = float(dts[k])
++            gx = gx0[sl] + vx[sl] * SP * dt; gy = gy0[sl] + vy[sl] * SP * dt
++            # (3m,) points: track centre, +1 cell in x, +1 cell in y (float64 on the CPU; m is small)
++            GX = torch.tensor(np.r_[gx, gx + SP, gx], dtype=torch.float64)
++            GY = torch.tensor(np.r_[gy, gy, gy + SP], dtype=torch.float64)
++            Wd = TDt[2][None] + GX[:, None] * TDt[0][None] + GY[:, None] * TDt[1][None]
++            Wd = Wd / torch.linalg.norm(Wd, dim=1, keepdim=True)
++            X = d * Wd - torch.tensor(np.asarray(obs[k], float), dtype=torch.float64)[None]
++            q = X @ TFt.T
++            u = ((q[:, 0] / q[:, 2]) - x0) / PIX; v = ((q[:, 1] / q[:, 2]) - y0) / PIX
++            u0, ux, uy = u[:m], u[m:2 * m] - u[:m], u[2 * m:] - u[:m]
++            v0, vx_, vy_ = v[:m], v[m:2 * m] - v[:m], v[2 * m:] - v[:m]
++            u0, ux, uy, v0, vx_, vy_ = [a_.to(f32).to(dev)[:, None] for a_ in (u0, ux, uy, v0, vx_, vy_)]
++            dX = EX_t + EVX_t * dt; dY = EY_t + EVY_t * dt          # (1, G) offsets in cells
++            cu = torch.floor(u0 + ux * dX + uy * dY + 0.5)
++            cv = torch.floor(v0 + vx_ * dX + vy_ * dY + 0.5)
++            ins = (cu >= 0) & (cu <= W - 1) & (cv >= 0) & (cv <= H - 1)
++            idx = (cv.clamp(0, H - 1).to(torch.int64) * W + cu.clamp(0, W - 1).to(torch.int64))
++            val = flat[k][idx].float()
++            val = torch.where(ins & (val != 0), val.clamp(-clip, clip) - float(mu[k]), torch.zeros_like(val))
++            acc.add_(val, alpha=float(w[k]))
++            del cu, cv, ins, idx, val, dX, dY
++        acc *= norm
++        mx_, am_ = acc.max(1)
++        best[sl] = mx_.cpu().numpy(); arg[sl] = am_.cpu().numpy()
++        del acc
++    return best, EX[arg], EY[arg], EVX[arg], EVY[arg]

@@ -1,0 +1,18 @@
+--- submission/stackd/finder.py	2026-11-05 06:01:44
++++ ../tmp/armD/stackd/finder.py	2026-11-05 08:41:08
+@@ -2066,6 +2066,15 @@
+         ng = ((vals >= GOOD) & covc).sum(1)
+         ncov = np.maximum(covc.sum(1), 1)
+         sc = np.clip(vals, -2, 6).sum(1) / np.sqrt(ncov)
++        if os.environ.get("TNO_NS_SCROB", "0") == "1":
++            # gen 87 (opt-in): robust row score -- clip at 4, drop the best covered night, so tracks made by one bright
++            # night / clamp-ceiling plateaus no longer outrank faint all-night tracks.
++            try:
++                cv_ = np.where(covc, np.clip(vals, -2, 4), 0.0)
++                mx_ = np.where(covc, cv_, -9.0).max(1)
++                sc = (cv_.sum(1) - np.where(ncov > 1, mx_, 0.0)) / np.sqrt(np.maximum(ncov - 1, 1))
++            except Exception as ex_:
++                log_(f"night seeds: SCROB failed {repr(ex_)[:200]}")
+         keep = np.flatnonzero(ng >= 3)
+         # gen 52 (gen051 Next #1): strict gate -- a night *peak* (not only a map value) within TRT x TOL of the
+         # predicted position on >= TRIP nights, and forced night-sum score >= SCMIN.  Lets a larger peak cap

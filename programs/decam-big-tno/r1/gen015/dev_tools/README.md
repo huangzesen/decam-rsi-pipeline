@@ -1,0 +1,102 @@
+Development tools of gen003 (not imported by finder.py, not needed to run it). Synthetic bodies only: random two-body orbits.
+
+- plant.py SRC DST N SEED [RMIN RMAX]: copy of a patch with N planted bodies (appended and regrouped by exposure) + truth.npz.
+- score.py candidates.json DST [NTOP]: found bodies as the task scores them, candidates matching no planted body, carried classes.
+- funnel.py OUT DST: where bodies are lost (needs a run with FINDER_DEBUG=1; DST/seedable.npy and stats.npy are optional).
+- cdbg.py OUT DST: what the carry vote saw for arcs of planted bodies (needs OUT/carry.pkl from FINDER_DEBUG=1).
+
+finder.py development switches: FINDER_DEVCACHE (prep cache file), FINDER_DEBUG (dumps raw*.pkl, grown.pkl, carry.pkl,
+debug.pkl), FINDER_RR=lo,hi (one distance slice in au), FINDER_PASSES=0,1, FINDER_LOADRAW / FINDER_LOADGROWN / FINDER_LOAD3
+(restart from dumps: growth + carry only, ~2 min on CPU), FINDER_NOCARRY, FINDER_NOFIXG.
+
+Added by gen004 (paths inside are those of the session: /tmp/p2, /tmp/w/cache_*.npz - edit before use):
+- plant_faint.py: plant.py with magnitudes skewed to the faint end (21.0 + 3.6 sqrt(u)).
+- pat.py: share of scored planted bodies with 3 seed nights in a 16/32/64-day window + a 4th night, seeds against all kept.
+- funnel2.py: found rate by night pattern (nights, most nights in 64 d / 130 d, most nights outside the best 130 d).
+- real.py OUT: the candidates of an unplanted run with their features and the seed share of their detections.
+- ndstat.py CAND [DST]: hit / miss / opportunity nights of the non-detection test by class (true, mixed, none, unplanted).
+- auc.py CAND DST [UNPLANTED_CAND]: ranking of true against chance linkages (<= 7 nights) for variants of the score.
+- finder.py switches added: FINDER_NOPOOL (skip the arc pool), FINDER_P4 (spare-time pass with the wide seed set),
+  FINDER_SNRSEED (lowest seed S/N, default 5.0); FINDER_DEBUG now also dumps g3.pkl (3-night linkages, for FINDER_LOAD3).
+
+Added by gen005 (paths inside are those of the session: /tmp/p2 = planted set, /tmp/w/cache_p2.npz = prep cache, /tmp/w/info.pkl):
+- pat2.py: night pattern of every scored planted body (nights per season, most nights in 32/64/130 d) -> /tmp/w/info.pkl.
+- funnel3.py OUT: found / raw linkage / grown, by cadence class (ge5in130, 4in64, 4in130, 3in32, 3in64, 3in130, max2) and nights.
+- cdbg2.py OUT: outcome of the carry vote for 3-night seeds of planted bodies (needs OUT/carry.pkl and OUT/funnel3.pkl).
+- tdbg.py OUT: what the vote sees of a seed's own far detections (needs a run with FINDER_TRUTH=/tmp/p2/truth.npz FINDER_DEBUG=1):
+  are they inside the box, does each agree with the model, do two nights share a parameter point, and what the best cell held.
+- finder.py switches added: FINDER_TRUTH (truth.npz, for tdbg.py), FINDER_SNRB (lowest S/N of a P5 seed, 6.5), FINDER_NBMAX,
+  FINDER_GS5 (distance step of P5), FINDER_MINN5 (3: P5 also returns 3-night linkages), FINDER_MAG3 (magnitude agreement of
+  3-night linkages, 0 = off), FINDER_NGV (night groups of the vote); FINDER_LOADRAW / FINDER_LOADGROWN may now be combined with
+  FINDER_PASSES (run one pass on top of dumped results).
+
+Added by gen006 (paths inside: /tmp/p2 = planted set made with plant_faint.py ... 3000 11 39.5 41.5, /tmp/w/cache_p2.npz, /tmp/w/info.pkl from pat2.py):
+- ana.py OUT: found / not matching, rank of true against non-matching candidates, found by cadence class x brightness
+  (median over nights of the best S/N of the night: faint < 6, mid 6-9, bright); writes OUT/found.pkl.
+- pot.py OUT: for the bodies ana.py reports lost, per class: do they have 3 / 4 seed-quality nights inside 32 / 64 / 130 d
+  (all seeds, S/N >= 5.5, S/N >= 6.5), and seed pairs in two or three seasons.
+- finder.py switches added: FINDER_MINN3 (4: the 64-day pass keeps no 3-night linkages), FINDER_ARC3 / FINDER_SNR3 (shortest arc
+  and second-brightest S/N of a 3-night linkage of the 64-day and season-long passes), FINDER_K3 (most 3-night linkages per
+  window and distance), FINDER_N3MAX (budget of returned 3-night linkages per pass in the single-process branch),
+  FINDER_CLEANV (0: the carry vote takes every kept detection, as in gen005), FINDER_Q3 (0: carry queue by arc only),
+  FINDER_P5B (season-long pass again on seeds down to FINDER_SNRC = 5.5 in spare time; off), `--procs 1` runs the
+  single-process (GPU) branch on the CPU.
+
+Added by gen007 (paths inside: /tmp/p2 = gen006's planted set, /tmp/w/cache_p2.npz):
+- incr.py CAND DST BASEFOUND.npy: bodies found by CAND that a baseline had not (BASEFOUND = /tmp/found.npy written by a
+  complete run of score.py on the baseline - do not pipe score.py into head, it dies before it saves), their nights per
+  season, and the candidates matching nothing.
+- finder.py switches added: FINDER_MAGP (magnitude agreement of a pair, 1.0 mag; 0 = off), FINDER_OLDORDER (gen006's order
+  of the distances), FINDER_ADAPT (0: no pair budget on schedule) and FINDER_MPMIN (its floor, 2e6 pairs; set it to ~2e4
+  to see it act on the sample with `--procs 1`), FINDER_P5B (now on; 0 = off) and FINDER_SPARE5 (its share of the spare
+  time, 0.6), FINDER_P7 (1: the two-season pass, off) with FINDER_GS7 / FINDER_CELL7 / FINDER_MAXPAIRS7 /
+  FINDER_MAXSEEDS7 / FINDER_MINN7 / FINDER_GD7 / FINDER_SPARE7.
+- `--procs 1` runs torch on all cores: do not run it beside a timed 8-core run.
+
+Added by gen009 (paths inside: /tmp/p3 = planted set made with plant_real.py ... 3000 11 39.5 41.5, /tmp/w/cache_*.npz = prep caches,
+/tmp/w/cnt.npy = static count of every row, written by sharpstat.py):
+- plant_real.py: plant_faint.py with the sharpness a real point source has: 0.97 + N(0, (3.4 / S/N)^2 + 0.08^2) instead of
+  1.00 +- 0.08. Use this one: with the old planted sets the sharpness cuts cost nothing, on the sky they cost 15-30 % of the
+  faint detections.
+- sharpstat.py SCEN: histogram of the sharpness by S/N for static (>= 3 nights), two-night and one-night detections; writes
+  /tmp/w/cnt.npy. ~3 min.
+- audit.py CAND.json SCEN [PMIN] [CNT.npy]: for each candidate with p >= PMIN (not planted), an independent orbit fit and every
+  catalogue detection within 2" of its track in every exposure: S/N, sharpness, flag, static count, held or not. Shows what the
+  cuts take from a real body.
+- astro.py: positional scatter of detections around bright reference stars by S/N (real astrometric error against the planted model).
+- verif.py SCEN CACHE [T]: share of clean detections that another night's same-band exposure could have shown (a "verified
+  non-static" flag); measured, not used (17 % of the clean detections against 46 % of the planted ones).
+- useful.py SCEN CACHE [T] [RAD]: on how many other nights could a body of the detection's magnitude be seen within RAD deg;
+  measured, not used (80 % of the seeds have >= 4 such nights within 1.3 deg).
+- finder.py switches added: FINDER_SHW (sharpness scatter x S/N, 3.4; 0 = the fixed windows of gen007), FINDER_SHS (share of it
+  that the seed window follows, 1; 0 = seeds keep 0.5-1.8), FINDER_FLOODCAP (a flooded exposure keeps this multiple of the
+  median count of its brightest one-night detections, 1; 0 = flooded exposures are dropped as in gen007).
+- plant_colour.py: plant_real.py with one redness per body (g-r 0.4-1.1, r-i 0.1-0.5, r-z 0.2-0.9) instead of the colours
+  the code assumes (0.6, 0.25, 0.4): tests the magnitude agreement cuts and the scatter penalty of the score.
+
+Added by gen010 (paths inside: /tmp/p3 = planted set made with `plant_real.py /app/data/sample /tmp/p3 3000 11 39.8 40.6`, /tmp/w/cache_p3.npz = prep cache;
+searched with `FINDER_RR=39.3,41.1`):
+- cls.py CAND.json DST [FOUND.npy]: found share of the scored planted bodies by night pattern (nights of the best season: >= 5, 4, 3, <= 2;
+  far seasons with a pair or single nights only) x brightness; true / non-matching counts by p. Writes the found set.
+- pur.py CAND.json DST: candidates that hold a planted body but fail the 80 % / 5-night rule (4 nights + 1 chance night mostly).
+- cfun.py OUT DST CACHE: funnel of the carry classes (needs a run with FINDER_DEBUG=1: g3.pkl, carry.pkl, grown.pkl): kept nights,
+  seed nights, 3-night linkage made, voted, two new nights at the best cell, passed, verified.
+- p8ana.py OUT DST CACHE SNRMIN [FOUND.npy]: raw linkages of the season-pair pass (raw5.pkl of a FINDER_DEBUG=1 run with FINDER_PASSES=5)
+  against the truth, and its potential (seed pairs in two neighbouring seasons) by class.
+- sparse.py CAND.json DST: candidates by the largest number of nights in one season x nights: true / non-matching and their p.
+- finder.py switches added: FINDER_P8 (0: no season-pair pass, and the pass ends of gen008), FINDER_SEED8 (seed set, seedb_np = S/N >= 6.5),
+  FINDER_DTMIN8 (0.7 d), FINDER_GS8 (distance step, 8e-4), FINDER_CELL8 (48"), FINDER_HV8 (velocity scale of the hash, 180 d),
+  FINDER_MAG8 (0.8 mag), FINDER_K8 (150 short linkages per search before the window is thinned), FINDER_MAXPAIRS8, FINDER_MAXSEEDS8,
+  FINDER_TOLFIT8, FINDER_END8 (end of its slot, 0.80 of the budget), FINDER_SPARE8 (> 0: a spare-time pass instead).
+  A quick test of the pass alone on top of a dumped run: FINDER_PASSES=5 FINDER_LOADRAW=OUT/raw5.pkl FINDER_LOADGROWN=OUT/grown.pkl FINDER_NOCARRY=1.
+- ucand.py CAND.json SCEN [PMIN]: candidates of an unplanted run with nights per season, distance, rms, S/N.
+
+Added by gen015 (paths inside: /tmp/p3 = gen010's planted set, /tmp/w/cache_p3.npz = prep cache):
+- gapana.py OUT: for the scored planted bodies with fewer than 5 nights in any season, by night pattern: bright pairs (S/N >= 6.5)
+  in two seasons, a raw 4-night linkage of the season-pair passes (OUT/raw5.pkl, raw6.pkl), grown to 5 nights (OUT/debug.pkl); then
+  the same by the length of the pairs (both >= 3 d, one shorter, both shorter). Needs a run with FINDER_DEBUG=1.
+- finder.py switches added: FINDER_APAR (cells of the season-pair hash x this along the ecliptic and its distance step x this, 4;
+  1 = gen010's hash), FINDER_APERP (cell factor across the ecliptic, 1), FINDER_TOLFIT8 (now 0.6), FINDER_GAPS (gaps of the gap
+  pass in seasons, "2,3,4,5,6"; empty = no gap pass), FINDER_SPAREG (its share of what P8 leaves of the slot, 0.7), FINDER_CUBIC
+  (0: no third-order term in the season-pair model), FINDER_Q3R (0: gen010's carry order), FINDER_SCANMAG (0: the scan's old chance
+  level). The pass numbers of FINDER_PASSES are now 0-4 as before, 5 = P8, 6 = gap pass, 7 = P5b.

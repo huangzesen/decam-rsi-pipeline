@@ -1,0 +1,304 @@
+diff -ruN -x __pycache__ -x submission $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/combo.py submission/experiments/gen112_armC_tools/combo.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/combo.py	1969-12-31 16:00:00
++++ submission/experiments/gen112_armC_tools/combo.py	2026-11-06 20:37:39
+@@ -0,0 +1,20 @@
++import sys, numpy as np, json
++sd = sys.argv[1]; ZT = float(sys.argv[2]) if len(sys.argv) > 2 else 2.5
++D = np.load(sd + "/disc_stats.npz"); z = np.load(sd + "/refined_vc.npz"); rkd = z["rkd"]
++truth = json.load(open("$RSI_SANDBOX/r1/gen112/tmp/inj7d/truth.json"))["bodies"]
++m = D["match"]; zc = D["zc"]; conc = D["conc"]; k3 = rkd == 3
++lab = np.array([truth[j]["cls"] + str(j) if j >= 0 else "-" for j in m])
++junk = k3 & (m < 0) & (zc >= ZT)
++print("junk n", junk.sum(), "conc quantiles", np.round(np.nanpercentile(conc[junk], [50, 90, 95, 99]), 2))
++for w in (0, 0.5, 1.0, 1.5, 2.0, 3.0):
++    sc = zc + w * np.nan_to_num(conc, nan=0)
++    best = {}
++    for k in np.flatnonzero(k3 & (m >= 0)):
++        if lab[k] not in best or sc[k] > sc[best[lab[k]]]: best[lab[k]] = k
++    s = " ".join(f"{b}:{int((sc[junk] >= sc[k]).sum())}" for b, k in sorted(best.items()) if b[0] != "A")
++    sa = sum(int((sc[junk] >= sc[k]).sum()) for b, k in best.items() if b[0] == "A")
++    print(f"w={w}: junk-above per B/C body: {s} | sum over A {sa}")
++# gate: conc threshold
++for ct in (2.0, 2.5, 2.8, 3.0):
++    print("conc>=", ct, "junk pass", int((junk & (conc >= ct)).sum()), "of", junk.sum(), " zc>=3.5 junk pass", int((junk & (zc >= 3.5) & (conc >= ct)).sum()),
++          " real pass:", sorted(set(lab[k3 & (m >= 0) & (conc >= ct)])))
+diff -ruN -x __pycache__ -x submission $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/disc.py submission/experiments/gen112_armC_tools/disc.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/disc.py	1969-12-31 16:00:00
++++ submission/experiments/gen112_armC_tools/disc.py	2026-11-06 20:37:39
+@@ -0,0 +1,147 @@
++"""disc.py SDDIR TRUTH EXPOSURES.csv : ROC of kind-3 junk discriminators on refined tracks."""
++import sys, json, csv, math, numpy as np
++sys.path.insert(0, "$RSI_SANDBOX/r1/gen112/tmp/armC/submission/stackd")
++import orbit
++sd, tr, ex = sys.argv[1:4]
++z = np.load(sd + "/refined_vc.npz")
++v, c, wf, night, rkd = z["v"].astype(float), z["c"].astype(bool), z["wf"].astype(float), z["night"], z["rkd"]
++ref = json.load(open(sd + "/refined.json"))["candidates"]
++S = np.array([r["state"] for r in ref]); tep = ref[0]["epoch_mjd"]
++truth = json.load(open(tr)); rows = list(csv.DictReader(open(ex)))
++t = np.array([float(r["mjd_mid"]) for r in rows]); obs = np.array([[float(r[k]) for k in ("obs_x", "obs_y", "obs_z")] for r in rows])
++nts = np.floor(t + 0.3).astype(int)
++ARC = math.pi / 180 / 3600
++D = orbit.predict_dirs_b(S, tep, t, obs)  # (K,N,3)
++match = np.full(len(S), -1); mcls = np.array([""] * len(S), dtype=object)
++for j, b in enumerate(truth["bodies"]):
++    e = np.array(b["exps"], int)
++    if len(e) == 0: continue
++    u = orbit.predict_dirs(b["state"], b["epoch_mjd"], t, obs)
++    sep = np.arccos(np.clip((D[:, e] * u[e][None]).sum(-1), -1, 1)) / ARC
++    for k in np.flatnonzero((sep < 2).any(1)):
++        nn = len(set(nts[e[sep[k] < 2]].tolist()))
++        if nn >= 3: match[k] = j; mcls[k] = b["cls"] + str(j)
++RC = 3.0
++def stk(vv, cc, msk=None):
++    w = wf[None] * (1 if msk is None else msk[None])
++    return (vv * w).sum(1) / np.sqrt(np.maximum((cc * w * wf[None]).sum(1), 1e-3))
++NREF = {}
++_cnt = [0]
++def zn(x):
++    _cnt[0] += 1; key = _cnt[0] % 1000
++    if FREEZE[0]:
++        m, s = NREF[key]
++    else:
++        nul = x[rkd == 2]; m = np.median(nul); s = 1.4826 * np.median(np.abs(nul - m)) + 1e-3; NREF[key] = (m, s)
++    return (x - m) / s
++FREEZE = [False]
++def stats(v, c):
++    _cnt[0] = 0
++    vv = np.where(c, v, 0.0); vc = np.minimum(vv, RC)
++    out = {}
++    out["zc"] = zn(stk(vc, c))
++    out["zu"] = zn(stk(vv, c))
++    un = np.unique(night); par = np.isin(night, un[::2]).astype(float)
++    a, b_ = stk(vc, c, par), stk(vc, c, 1 - par)
++    out["alt"] = zn(np.minimum(a, b_) * math.sqrt(2))
++    tq = np.zeros(len(night)); tq[len(night) // 2:] = 1  # stackd frames are time-ordered?
++    a2, b2 = stk(vc, c, 1 - tq), stk(vc, c, tq)
++    out["half"] = zn(np.minimum(a2, b2) * math.sqrt(2))
++    # per-night flux chi2
++    F, W_ = [], []
++    for u_ in un:
++        idx = night == u_
++        num = (vc[:, idx] * wf[idx][None]).sum(1); den = (c[:, idx] * wf[idx][None] ** 2).sum(1)
++        F.append(np.where(den > 0, num / np.maximum(den, 1e-9), 0)); W_.append(den)
++    F, W_ = np.stack(F, 1), np.stack(W_, 1)
++    fb = (F * W_).sum(1) / np.maximum(W_.sum(1), 1e-9)
++    ncv = (W_ > 0).sum(1)
++    chi = ((F - fb[:, None]) ** 2 * W_).sum(1) / np.maximum(ncv - 1, 1)
++    out["chi"] = chi
++    out["zc_chi"] = out["zc"] / np.sqrt(np.maximum(chi, 1.0))
++    # leave-best-night-out and leave-best-2-out
++    ns = F * np.sqrt(W_)  # per-night S/N
++    srt = np.sort(np.where(W_ > 0, ns, -np.inf), 1)[:, ::-1]
++    tot = ns.sum(1)
++    tw = W_.sum(1)
++    # remove best night
++    jb = np.argmax(np.where(W_ > 0, ns, -np.inf), 1)
++    r1 = (F * W_).sum(1) - (F * W_)[np.arange(len(F)), jb]; w1 = tw - W_[np.arange(len(F)), jb]
++    out["lono"] = zn(r1 / np.sqrt(np.maximum(w1, 1e-9)))
++    # median per-night S/N * sqrt(ncv)
++    nsm = np.where(W_ > 0, ns, np.nan)
++    with np.errstate(all="ignore"):
++        out["med"] = zn(np.nan_to_num(np.nanmedian(nsm, 1)) * np.sqrt(ncv))
++    out["ncv"] = ncv
++    return out
++st = stats(v, c)
++# centroid / patch stats
++try:
++    P = np.load(sd + "/patch.npz"); pt, pc = P["pt"].astype(float), P["pc"]
++    pt = np.where(pc, pt, 0)
++    pts = pt.shape
++    # per-night weighted co-add patches
++    offs, conc = [], []
++    for u_ in np.unique(night):
++        idx = night == u_
++        num = (pt[:, idx] * wf[idx][None, :, None, None]).sum(1); den = (pc[:, idx] * wf[idx][None, :, None, None] ** 2).sum(1)
++        cp = np.where(den > 0, num / np.sqrt(np.maximum(den, 1e-9)), -9)
++        sub = cp[:, 1:6, 1:6].reshape(len(cp), -1)
++        am = np.argmax(sub, 1); dy, dx = am // 5 - 2, am % 5 - 2
++        cvn = den[:, 3, 3] > 0
++        offs.append(np.where(cvn, np.hypot(dx, dy), np.nan))
++        ring = np.concatenate([cp[:, 1:6, 1], cp[:, 1:6, 5], cp[:, 1, 2:5], cp[:, 5, 2:5]], 1).mean(1)
++        conc.append(np.where(cvn, cp[:, 3, 3] - ring, np.nan))
++    offs, conc = np.stack(offs, 1), np.stack(conc, 1)
++    with np.errstate(all="ignore"):
++        st["noff"] = np.nanmean(offs <= 1.0 + 1e-6, 1) * 1.0   # fraction of nights peaking within 1 px
++        st["moff"] = -np.nanmean(offs, 1)
++        st["conc"] = np.nanmedian(conc, 1)
++    # full-stack patch: shape
++    num = (pt * wf[None, :, None, None]).sum(1); den = (pc * wf[None, :, None, None] ** 2).sum(1)
++    cp = num / np.sqrt(np.maximum(den, 1e-9))
++    st["sharp"] = cp[:, 3, 3] - 0.5 * (cp[:, 2, 3] + cp[:, 4, 3] + cp[:, 3, 2] + cp[:, 3, 4]) / 2
++except Exception as e:
++    print("no patch", e)
++k3 = rkd == 3
++print("refined", len(S), "kind3", k3.sum(), "matched kind3", (k3 & (match >= 0)).sum(), "by body", sorted(set(mcls[k3 & (match >= 0)])))
++ZT = float(sys.argv[4]) if len(sys.argv) > 4 else 2.5
++comp = k3 & (match < 0) & (st["zc"] >= ZT)
++print("junk competitors zc>=3:", comp.sum(), " zc>=3.5:", (k3 & (match < 0) & (st["zc"] >= 3.5)).sum())
++keys = [k for k in st if k not in ("ncv",)]
++# for each matched body (best zc track per body among kind-3), number of junk competitors above it under each stat
++bodies = {}
++for k in np.flatnonzero(k3 & (match >= 0)):
++    if mcls[k][0] == "A": continue
++    if mcls[k] not in bodies or st["zc"][k] > st["zc"][bodies[mcls[k]]]: bodies[mcls[k]] = k
++print("stat:", " ".join(f"{k:>7s}" for k in keys))
++for nm, k in sorted(bodies.items()):
++    print(f"{nm:5s} zc {st['zc'][k]:5.2f} vals", " ".join(f"{st[q][k]:7.2f}" for q in keys))
++    print("      junk-above", " ".join(f"{int((st[q][comp] >= st[q][k]).sum()):7d}" for q in keys))
++print("junk competitor quantiles (10/50/90) per stat:")
++for q in keys:
++    print(f"  {q:7s}", np.round(np.nanpercentile(st[q][comp], [10, 50, 90]), 2))
++np.savez(sd + "/disc_stats.npz", match=match, **{k: st[k] for k in st})
++# synthetic positives: null (kind-2) refined tracks + constant flux proportional to wf, scaled to total T
++rng = np.random.default_rng(0)
++base = np.flatnonzero((rkd == 2) & (st["ncv"] >= 4))
++base = rng.choice(base, min(1500, len(base)), replace=False)
++pos_all = {}
++FREEZE[0] = True
++for T in (2.5, 3.0, 3.5, 4.0):
++    vb, cb = v[base].copy(), c[base]
++    s = T / np.sqrt(np.maximum((cb * wf[None] ** 2).sum(1), 1e-3))
++    vb = np.where(cb, np.minimum(vb + s[:, None] * wf[None], 5.0), 0)
++    ss = stats(vb, cb)
++    for q in ss: pos_all.setdefault(q, []).append(ss[q])
++pos = {q: np.concatenate(pos_all[q]) for q in pos_all}
++pk = [q for q in keys if q in pos]
++def auc(a, b):
++    a, b = a[np.isfinite(a)], b[np.isfinite(b)]
++    if len(a) == 0 or len(b) == 0: return float("nan")
++    allv = np.r_[a, b]; r = allv.argsort().argsort() + 1
++    return (r[:len(a)].sum() - len(a) * (len(a) + 1) / 2) / (len(a) * len(b))
++for lo_, hi_ in ((2.5, 2.75), (2.75, 3.0), (3.0, 3.5), (2.5, 3.5)):
++    P_ = (pos["zc"] >= lo_) & (pos["zc"] < hi_); N_ = k3 & (match < 0) & (st["zc"] >= lo_) & (st["zc"] < hi_)
++    print(f"zc bin [{lo_},{hi_}): synth pos {P_.sum()}, junk {N_.sum()}; AUC (pos>junk):",
++          " ".join(f"{q}={auc(pos[q][P_], st[q][N_]):.2f}" for q in pk))
+diff -ruN -x __pycache__ -x submission $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/emu.py submission/experiments/gen112_armC_tools/emu.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/emu.py	1969-12-31 16:00:00
++++ submission/experiments/gen112_armC_tools/emu.py	2026-11-06 20:37:39
+@@ -0,0 +1,13 @@
++"""emu.py SDDIR OUT.json NEW.json [K3DZ K3DC K3DB]: offline emulation of TNO_K3DISC on a stackd output."""
++import sys, json, math, numpy as np
++sd, so, sn = sys.argv[1:4]; ZT, CT, B = (float(x) for x in (sys.argv[4:7] if len(sys.argv) > 6 else (3.3, 2.5, 1.0)))
++D = np.load(sd + "/disc_stats.npz"); ref = json.load(open(sd + "/refined.json"))["candidates"]
++S = np.array([r["state"] for r in ref])
++cs = json.load(open(so))["candidates"]; n = 0
++for c in cs:
++    if "zc" not in c or c["zc"] < ZT: continue
++    j = int(np.argmin(np.linalg.norm(S[:, :3] - np.array(c["state"][:3])[None], axis=1)))
++    if D["conc"][j] >= CT:
++        z = c["zc"] + B; c["p"] = max(c["p"], 1 / (1 + math.exp(-(z - 4.5) / 0.8))); n += 1
++print("boosted", n)
++json.dump({"candidates": sorted(cs, key=lambda c: -c["p"])}, open(sn, "w"))
+diff -ruN -x __pycache__ -x submission $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/outstats.py submission/experiments/gen112_armC_tools/outstats.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/experiments/gen112_armC_tools/outstats.py	1969-12-31 16:00:00
++++ submission/experiments/gen112_armC_tools/outstats.py	2026-11-06 20:37:39
+@@ -0,0 +1,21 @@
++"""outstats.py SDDIR OUT.json TRUTH EXP : stats (from disc_stats.npz) of the output's kind-3 (zc) tracks, top 80."""
++import sys, json, csv, numpy as np
++sys.path.insert(0, "$RSI_SANDBOX/r1/gen112/tmp/exp"); sys.argv, a = ['x'], sys.argv
++import score_inject as si
++sd, so, tr, ex = a[1:5]
++D = np.load(sd + "/disc_stats.npz"); ref = json.load(open(sd + "/refined.json"))["candidates"]
++S = np.array([r["state"] for r in ref])
++truth = json.load(open(tr)); rows = list(csv.DictReader(open(ex)))
++cands = json.load(open(so))["candidates"]
++cs, res, hr, dup = si.score(truth, cands, rows)
++keys = [k for k in D.files if k not in ("match", "ncv")]
++print("rank    p   body  dist  " + " ".join(f"{k:>6s}" for k in keys))
++seen = set()
++for k, c in enumerate(cs[:120]):
++    if "zc" not in c: continue
++    j = int(np.argmin(np.linalg.norm(S[:, :3] - np.array(c["state"][:3])[None], axis=1)))
++    dd = float(np.linalg.norm(S[j, :3] - np.array(c["state"][:3])))
++    h = res[k]; b = truth["bodies"][h[0]]["cls"] + str(h[0]) if h else "-"
++    if b != "-" and b in seen: continue
++    seen.add(b)
++    print(f"{k:4d} {c['p']:.3f} {b:5s} {dd:.3f} zc={c['zc']:.2f} " + " ".join(f"{float(D[q][j]):6.2f}" for q in keys))
+diff -ruN -x __pycache__ -x submission $RSI_SANDBOX/r1/gen112/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen112/workspace/submission/stackd/finder.py	2026-11-06 14:56:50
++++ submission/stackd/finder.py	2026-11-06 20:20:42
+@@ -1321,6 +1321,37 @@
+     except Exception:
+         RCLIP = 0.0
+ 
++    K3DISC = os.environ.get("TNO_K3DISC", "0") == "1"
++    K3DZ = float(os.environ.get("TNO_K3DZ", "3.3")); K3DC = float(os.environ.get("TNO_K3DC", "2.5"))
++    K3DB = float(os.environ.get("TNO_K3DB", "1.0")); K3DLOG = os.environ.get("TNO_K3DLOG", "1") != "0"
++
++    def conc_states(S):
++        """S (K,6) -> conc (K,): median over covered nights of centre minus 5x5-ring mean of the night co-add S/N."""
++        u_ = orbit.predict_dirs_b(S, t_ep, t, obs); q_ = u_ @ TF0.T
++        ix_ = np.rint((q_[..., 0] / q_[..., 2] - x0) / PIX).astype(np.int64)
++        iy_ = np.rint((q_[..., 1] / q_[..., 2] - y0) / PIX).astype(np.int64)
++        PT_ = np.zeros(ix_.shape + (7, 7)); PC_ = np.zeros(ix_.shape + (7, 7), bool)
++        for dy_ in range(-3, 4):
++            for dx_ in range(-3, 4):
++                xx_ = ix_ + dx_; yy_ = iy_ + dy_
++                ok_ = (xx_ >= 0) & (xx_ < W) & (yy_ >= 0) & (yy_ < H)
++                lin_ = np.where(ok_, yy_ * W + xx_, 0) + np.arange(N)[None] * (H * W)
++                lt__ = torch.from_numpy(lin_.ravel()).to(dev)
++                PT_[..., dy_ + 3, dx_ + 3] = maps.reshape(-1)[lt__].float().reshape(lin_.shape).cpu().numpy()
++                PC_[..., dy_ + 3, dx_ + 3] = cov.reshape(-1)[lt__].cpu().numpy().reshape(lin_.shape) & ok_
++        PT_ = np.where(PC_, PT_, 0.0)
++        cs_ = []
++        for idx in nights_idx:
++            wn = wf[idx][None, :, None, None]
++            num = (PT_[:, idx] * wn).sum(1); den = (PC_[:, idx] * wn ** 2).sum(1)
++            cp = num / np.sqrt(np.maximum(den, 1e-9))
++            ring = np.concatenate([cp[:, 1:6, 1], cp[:, 1:6, 5], cp[:, 1, 2:5], cp[:, 5, 2:5]], 1).mean(1)
++            cs_.append(np.where(den[:, 3, 3] > 0, cp[:, 3, 3] - ring, np.nan))
++        with np.errstate(all="ignore"), warnings.catch_warnings():
++            warnings.simplefilter("ignore")
++            r_ = np.nanmedian(np.stack(cs_, 1), axis=1)
++        return np.where(np.isfinite(r_), r_, -9.0)
++
+     def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None):
+         out = []
+         ref_ = sc
+@@ -1355,6 +1386,23 @@
+         except Exception as ex:
+             log("rclip failed:", repr(ex)[:200])
+             zc_ = None
++        # gen 112 (arm C, TNO_K3DISC, default 0 = gen110): point-source check for fstk (kind 3) tracks.  conc = median
++        # over covered nights of (night co-add S/N at the predicted pixel - mean of the co-add on the 5x5 border ring).
++        # Real bodies are point sources (inj7d: C25 3.0, B21 4.9, A 3.7-5.1), while kind-3 junk at zc >= 2.5 sits on
++        # diffuse excess (median 1.9, 95 % 2.5).  Tracks with zc >= K3DZ and conc >= K3DC get zc += K3DB.
++        try:
++            if K3DISC and zc_ is not None:
++                jq_ = np.flatnonzero((kd == 3) & np.isfinite(zc_) & (zc_ >= K3DZ))
++                if len(jq_):
++                    cq_ = conc_states(np.asarray(S, float)[jq_])
++                    ok_ = cq_ >= K3DC
++                    zc_ = zc_.copy(); zc_[jq_[ok_]] += K3DB
++                    z_ = np.where(zc_ > z_, zc_, z_)
++                    if len(jq_) and K3DLOG:
++                        log(f"k3disc: {int(ok_.sum())} of {len(jq_)} kind-3 tracks with zc >= {K3DZ} boosted; "
++                            f"conc {np.round(np.sort(cq_)[::-1][:8], 2).tolist()}")
++        except Exception as ex:
++            log("k3disc failed:", repr(ex)[:200])
+         n3n = None
+         try:
+             if N3 > 0 and n3 is not None and kd is not None and len(n3) == len(S) and int((kd == 2).sum()) >= 30:
+@@ -1740,6 +1788,21 @@
+             os.makedirs(SDD_, exist_ok=True); vR_, cR_ = score_states(np.array(refined))
+             np.savez(os.path.join(SDD_, "refined_vc.npz"), v=vR_.astype(np.float32), c=cR_, wf=np.asarray(wf, np.float32),
+                      night=np.asarray(night), rsc=np.array(rsc), rkd=np.array(rkd), rng=np.array(rng_))
++            if os.environ.get("TNO_PATCH_DUMP", "0") == "1":   # gen 112 arm C diagnostic: 7x7 map patches per exposure
++                SP_ = np.array(refined); u_ = orbit.predict_dirs_b(SP_, t_ep, t, obs); q_ = u_ @ TF0.T
++                fx_ = (q_[..., 0] / q_[..., 2] - x0) / PIX; fy_ = (q_[..., 1] / q_[..., 2] - y0) / PIX
++                ix_ = np.rint(fx_).astype(np.int64); iy_ = np.rint(fy_).astype(np.int64)
++                PT_ = np.zeros(ix_.shape + (7, 7), np.float32); PC_ = np.zeros(ix_.shape + (7, 7), bool)
++                for dy_ in range(-3, 4):
++                    for dx_ in range(-3, 4):
++                        xx_ = ix_ + dx_; yy_ = iy_ + dy_
++                        ok_ = (xx_ >= 0) & (xx_ < W) & (yy_ >= 0) & (yy_ < H)
++                        lin_ = np.where(ok_, yy_ * W + xx_, 0) + np.arange(N)[None] * (H * W)
++                        lt__ = torch.from_numpy(lin_.ravel()).to(dev)
++                        PT_[..., dy_ + 3, dx_ + 3] = maps.reshape(-1)[lt__].float().reshape(lin_.shape).cpu().numpy()
++                        PC_[..., dy_ + 3, dx_ + 3] = cov.reshape(-1)[lt__].cpu().numpy().reshape(lin_.shape) & ok_
++                np.savez(os.path.join(SDD_, "patch.npz"), pt=PT_, pc=PC_, fx=(fx_ - ix_).astype(np.float32),
++                         fy=(fy_ - iy_).astype(np.float32))
+             sdump_("refined", [dict(epoch_mjd=float(t_ep), state=[float(x) for x in refined[i]], p=0.5,
+                                     sc=float(rsc[i]), ng=int(rng_[i]), kd=int(rkd[i]), j=int(order_[i]) if i < len(order_) else -1,
+                                     seed=[float(x) for x in states[order_[i]]] if i < len(order_) else None)

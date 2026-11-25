@@ -1,0 +1,15 @@
+diff -ruN -x __pycache__ -x NOTES.md -x experiments $RSI_SANDBOX/r1/gen110/tmp/base/sub/stackd/finder.py sub/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen110/tmp/base/sub/stackd/finder.py	2026-11-06 16:11:14
++++ sub/stackd/finder.py	2026-11-06 17:03:54
+@@ -452,6 +452,11 @@
+             del Tm, Vm
+         except Exception as ex:
+             log("template failed, skipped:", repr(ex)[:200])
++    NEGZ_ = float(os.environ.get("TNO_NEGZ", "0") or 0)   # gen 110: pixels below -NEGZ sigma are artifacts -> uncovered (0)
++    if NEGZ_ > 0:
++        nz_ = maps < -NEGZ_
++        log(f"negz: {float(nz_.float().mean()):.5f} of map pixels below -{NEGZ_} set to 0")
++        maps = torch.where(nz_, torch.zeros_like(maps), maps); del nz_
+     maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
+     del nn, static
+     write_out(a.out, [])

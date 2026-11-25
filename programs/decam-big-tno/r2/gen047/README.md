@@ -1,0 +1,1 @@
+Run `python3 finder.py --scen DIR --out OUT --budget-s 1800` on one exposure catalogue. The finder writes ranked original-row associations to `OUT/candidates.json`. See `NOTES.md` for the method and its validation.

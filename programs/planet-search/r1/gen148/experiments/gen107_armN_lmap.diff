@@ -1,0 +1,260 @@
+diff -ruN -x experiments -x NOTES.md -x __pycache__ workspace/submission/stackd/finder.py tmp/armN/submission/stackd/finder.py
+--- workspace/submission/stackd/finder.py	2026-11-06 07:28:37
++++ tmp/armN/submission/stackd/finder.py	2026-11-06 10:52:22
+@@ -222,6 +222,48 @@
+     log(f"sky grid {W}x{H} at 1\"")
+     TF0_t = torch.tensor(TF0, dtype=torch.float32, device=dev)
+     maps = torch.full((N, H, W), float("nan"), dtype=torch.float16, device=dev)
++    # gen 107 armN (TNO_LMAP, default 1): fstk's own 2" maps from 8x8 avg-pooled S/N (mapper maps2); pixel j of the 2"
++    # grid is centred at x0 + PIX * (2 j + 0.5) (as fstk's 2x2 max-pool of the 1" maps).  Fail-safe: maps2 = None.
++    maps2 = None
++    H2_, W2_ = H // 2, W // 2
++    if os.environ.get("TNO_LMAP", "0") == "1":
++        try:
++            maps2 = torch.full((N, H2_, W2_), float("nan"), dtype=torch.float16, device=dev)
++        except Exception as ex:
++            log("lmap alloc failed:", repr(ex)[:200]); maps2 = None
++
++    def lmap_put(n2, g, pm2, dst=None):
++        # sample a CCD's 8x8-pooled map onto the 2" grid (frame n2 of maps2, or into dst)
++        u = orbit.radec_to_unit(g["rc"], g["dc"]); p = TF0 @ u
++        cx, cy = p[0] / p[2], p[1] / p[2]
++        P2 = 2 * PIX
++        ix0 = max(0, int((cx - g["rad"] - x0) / P2)); ix1 = min(W2_, int((cx + g["rad"] - x0) / P2) + 1)
++        iy0 = max(0, int((cy - g["rad"] - y0) / P2)); iy1 = min(H2_, int((cy + g["rad"] - y0) / P2) + 1)
++        if ix1 <= ix0 or iy1 <= iy0:
++            return
++        gx = x0 + PIX * (2 * torch.arange(ix0, ix1, device=dev, dtype=torch.float32) + 0.5)
++        gy = y0 + PIX * (2 * torch.arange(iy0, iy1, device=dev, dtype=torch.float32) + 0.5)
++        XI, ETA = gx[None, :].expand(len(gy), -1), gy[:, None].expand(-1, len(gx))
++        U = TF0_t[2][None, None] + XI[..., None] * TF0_t[0][None, None] + ETA[..., None] * TF0_t[1][None, None]
++        TL = torch.tensor(orbit.tangent_frame(g["rc"], g["dc"]), dtype=torch.float32, device=dev)
++        q = U @ TL.T
++        lx, ly = q[..., 0] / q[..., 2] * 1e3, q[..., 1] / q[..., 2] * 1e3
++        A = torch.stack([torch.ones_like(lx), lx, ly, lx * lx, lx * ly, ly * ly], -1)
++        px = A @ torch.tensor(g["cx"], dtype=torch.float32, device=dev)
++        py = A @ torch.tensor(g["cy"], dtype=torch.float32, device=dev)
++        ph, pw = pm2.shape
++        ux = (px - 3.5) / 8; uy = (py - 3.5) / 8
++        inside = (ux > -0.5) & (ux < pw - 0.5) & (uy > -0.5) & (uy < ph - 0.5)
++        if not bool(inside.any()):
++            return
++        grid = torch.stack([2 * ux / max(pw - 1, 1) - 1, 2 * uy / max(ph - 1, 1) - 1], -1)[None]
++        src = torch.from_numpy(pm2.astype(np.float32)).to(dev)[None, None]
++        v = F.grid_sample(src, grid, mode="nearest", align_corners=True)[0, 0]
++        tgt = maps2[n2] if dst is None else dst
++        sub = tgt[iy0:iy1, ix0:ix1]
++        take = inside & torch.isfinite(v)
++        tgt[iy0:iy1, ix0:ix1] = torch.where(take, v.to(tgt.dtype), sub)
++
+     def norm_(m):
+         s = m[::7, ::7]
+         s = s[torch.isfinite(s)].float()
+@@ -233,9 +275,29 @@
+       if len(mem) > 1:
+         acc = torch.zeros((H, W), dtype=torch.float32, device=dev)
+         cnt = torch.zeros((H, W), dtype=torch.float32, device=dev)
++        if maps2 is not None:
++            acc2 = torch.zeros((H2_, W2_), dtype=torch.float32, device=dev)
++            cnt2 = torch.zeros((H2_, W2_), dtype=torch.float32, device=dev)
+       for i in mem:
+         if len(mem) > 1:
+             maps[n].fill_(float("nan"))
++        if maps2 is not None:
++            try:
++                if len(mem) > 1:
++                    maps2[n].fill_(float("nan"))
++                m2l_ = res[i].get("maps2") or []
++                for (g, _), pm2 in zip(res[i]["maps"], m2l_):
++                    if pm2 is not None:
++                        lmap_put(n, g, pm2)
++                if len(mem) > 1:
++                    z2 = norm_(maps2[n])
++                    if z2 is not None:
++                        f2_ = torch.isfinite(z2)
++                        wi_ = w_exp[i] if DW else 1.0
++                        acc2 += torch.where(f2_, z2 * wi_, torch.zeros_like(z2)); cnt2 += f2_.float() * (wi_ * wi_)
++                        del z2, f2_
++            except Exception as ex:
++                log("lmap failed, off:", repr(ex)[:200]); maps2 = None
+         for g, pm in res[i]["maps"]:
+             u = orbit.radec_to_unit(g["rc"], g["dc"]); p = TF0 @ u
+             cx, cy = p[0] / p[2], p[1] / p[2]
+@@ -276,6 +338,10 @@
+         maps[n] = torch.where(cnt > 0, acc / torch.sqrt(torch.clamp(cnt, min=1)),
+                               torch.full_like(acc, float("nan"))).to(torch.float16)
+         del acc, cnt
++        if maps2 is not None:
++            maps2[n] = torch.where(cnt2 > 0, acc2 / torch.sqrt(torch.clamp(cnt2, min=1)),
++                                   torch.full_like(acc2, float("nan"))).to(torch.float16)
++            del acc2, cnt2
+     del res
+     # normalise each map, coverage
+     cov = torch.isfinite(maps)
+@@ -453,6 +519,35 @@
+         except Exception as ex:
+             log("template failed, skipped:", repr(ex)[:200])
+     maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
++    if maps2 is not None:
++        # gen 107 armN: normalise each 2" frame to unit robust sigma, static mask pooled (any 1" px static -> masked),
++        # optional per-pixel median-over-frames template subtraction (TNO_LMAP_TM), clip +-TNO_LMAP_CLIP.
++        try:
++            LCL = float(os.environ.get("TNO_LMAP_CLIP", "3.0"))
++            st2 = F.max_pool2d(static[None, None].half(), 2, 2)[0, 0, :H2_, :W2_] > 0
++            for n in range(N):
++                m = maps2[n]
++                c_ = torch.isfinite(m)
++                s_ = m[::5, ::5][c_[::5, ::5]].float()
++                if s_.numel() < 500:
++                    maps2[n] = torch.zeros_like(m); continue
++                med = torch.median(s_); sd = 1.4826 * torch.median(torch.abs(s_ - med))
++                maps2[n] = torch.where(c_ & ~st2, (m.float() - med) / torch.clamp(sd, min=1e-3),
++                                       torch.zeros_like(m, dtype=torch.float32)).half()
++            if os.environ.get("TNO_LMAP_TM", "0") == "1" and len(np.unique(night)) >= 4:
++                for y0_ in range(0, H2_, 256):
++                    sl_ = maps2[:, y0_:y0_ + 256].float()
++                    nz_ = sl_ != 0
++                    tm_ = torch.where(nz_, sl_, torch.full_like(sl_, float("nan")))
++                    md_ = torch.nan_to_num(torch.nanmedian(tm_, 0).values, nan=0.0)
++                    md_ = torch.where(nz_.sum(0) >= 4, md_.clamp(min=0), torch.zeros_like(md_))
++                    maps2[:, y0_:y0_ + 256] = torch.where(nz_, sl_ - md_[None], sl_).half()
++                    del sl_, nz_, tm_, md_
++            maps2.clamp_(-LCL, LCL)
++            log(f"lmap: 2\" maps {W2_}x{H2_}, clip {LCL}, static px {float(st2.float().mean()):.4f}")
++            del st2
++        except Exception as ex:
++            log("lmap finalise failed, off:", repr(ex)[:200]); maps2 = None
+     del nn, static
+     write_out(a.out, [])
+ 
+@@ -563,7 +658,8 @@
+             import fstk as fstk_
+             dl_ = min(search_deadline, (time.time() - T0) + float(os.environ.get("TNO_FSTK_F", "0.20")) * budget)
+             fr_rows, fr_frames = fstk_.fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0,
+-                                                    pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit)
++                                                    pole, GM, tframe, T0, dl_, log, len(frames), C_AU=C_AU, orbit=orbit,
++                                                    smaps_pre=maps2)
+             if fr_frames:
+                 best_all.extend(fr_rows); FST_ROWS = list(fr_rows)
+                 frames.extend(fr_frames); wi_of.extend([FSTK_WI] * len(fr_frames))
+@@ -574,6 +670,7 @@
+                     nhyp = max(nhyp, 1)
+         except Exception as ex:
+             log("fstk failed:", repr(ex)[:300])
++        maps2 = None
+         try:
+             if dev == "cuda":
+                 torch.cuda.empty_cache()
+diff -ruN -x experiments -x NOTES.md -x __pycache__ workspace/submission/stackd/fstk.py tmp/armN/submission/stackd/fstk.py
+--- workspace/submission/stackd/fstk.py	2026-11-06 07:28:37
++++ tmp/armN/submission/stackd/fstk.py	2026-11-06 10:52:22
+@@ -17,14 +17,15 @@
+ 
+ 
+ def fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0, pole, GM, tframe, T0,
+-                deadline, log, fi0, C_AU=173.1446, orbit=None):
++                deadline, log, fi0, C_AU=173.1446, orbit=None, smaps_pre=None):
+     rows_out, frames_out = [], []
+     DMIN = float(os.environ.get("TNO_FSTK_DMIN", "30")); DMAX = float(os.environ.get("TNO_FSTK_DMAX", "70"))
+     VLO = float(os.environ.get("TNO_FSTK_VLO", "0.85")); VHI = float(os.environ.get("TNO_FSTK_VHI", "1.12"))
+     ANG = math.radians(float(os.environ.get("TNO_FSTK_ANG", "25")))
+     GSPAN = float(os.environ.get("TNO_FSTK_GSPAN", "0.08"))
+-    DCLIP = float(os.environ.get("TNO_FSTK_CLIP", "4.0"))
++    DCLIP = float(os.environ.get("TNO_FSTK_CLIP", "2.5"))   # gen 107 armN: 2.5 (was 4.0)
+     BS = 0
++    FPOOL = os.environ.get("TNO_FSTK_POOL", "max")
+     I8 = os.environ.get("TNO_FSTK_I8", "1") != "0"
+     NPK = int(os.environ.get("TNO_FSTK_NPK", "300"))
+     PTH = float(os.environ.get("TNO_FSTK_PTHR", "3.0"))
+@@ -46,8 +47,14 @@
+     oref = obs[sel].mean(0)
+     # 2" pooled, winsorized maps
+     sm_ = []
+-    for i_ in range(0, N, 4):
+-        a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
++    if smaps_pre is not None and tuple(smaps_pre.shape) == (N, maps.shape[1] // 2, maps.shape[2] // 2):
++        log("fstk: using lmap 2\" avg-pooled maps")
++        sm_ = [smaps_pre.half()]
++    for i_ in (range(0) if sm_ else range(0, N, 4)):
++        if FPOOL == "avg":
++            a_ = F.avg_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0] * 2.0
++        else:
++            a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
+         if DCLIP > 0:
+             a_ = a_.clamp_(-DCLIP, DCLIP)
+         sm_.append(a_.half())
+diff -ruN -x experiments -x NOTES.md -x __pycache__ workspace/submission/stackd/mapper.py tmp/armN/submission/stackd/mapper.py
+--- workspace/submission/stackd/mapper.py	2026-11-06 07:28:37
++++ tmp/armN/submission/stackd/mapper.py	2026-11-06 10:52:22
+@@ -220,7 +220,11 @@
+ POOL_MODE = os.environ.get("TNO_POOL", "max")
+ 
+ 
+-def snr_pooled(img, msk, fwhm, pool=4, sig_out=None):
++LMAP = os.environ.get("TNO_LMAP", "0") == "1"
++LMODE = os.environ.get("TNO_LMAP_MODE", "ovl")   # gen 107 armN: also an 8x8 avg-pooled (2") S/N map for fstk
++
++
++def snr_pooled(img, msk, fwhm, pool=4, sig_out=None, avg_out=None):
+     """Matched-filter S/N map (as in process_ccd), max-pooled pool x pool. Returns float16 array (nan = no data).
+     gen 19: if sig_out is a list, the robust pixel noise (ADU) is appended to it (for depth weights)."""
+     torch, dev = _torch()
+@@ -263,6 +267,30 @@
+     m2 = torch.median(s2)
+     ns = 1.4826 * torch.median(torch.abs(s2 - m2))
+     snr = (snr - m2) / torch.clamp(ns, min=1e-6)
++    if avg_out is not None:
++        # gen 107 armN: 8x8 mean-pooled matched-filter S/N over okd pixels, robustly renormalised to unit sigma per CCD
++        try:
++            okf8 = okd.float()
++            if LMODE == "ovl":
++                # max over the 4 half-offset 8x8 boxes inside each 8x8 cell (stride-4 8x8 means, then 2x2 max)
++                n8 = F.avg_pool2d(torch.where(okd, snr, torch.zeros_like(snr)), 8, 4, padding=2, ceil_mode=True)
++                f8 = F.avg_pool2d(okf8, 8, 4, padding=2, ceil_mode=True)
++                a8 = torch.where(f8 >= 0.5, n8 / torch.clamp(f8, min=1e-3), torch.full_like(n8, -1e4))
++                a8 = F.max_pool2d(a8, 2, 2, ceil_mode=True)
++                a8 = torch.where(a8 < -1e3, torch.full_like(a8, float("nan")), a8)
++            else:
++                n8 = F.avg_pool2d(torch.where(okd, snr, torch.zeros_like(snr)), 8, 8, ceil_mode=True)
++                f8 = F.avg_pool2d(okf8, 8, 8, ceil_mode=True)
++                a8 = torch.where(f8 >= 0.5, n8 / torch.clamp(f8, min=1e-3), torch.full_like(n8, float("nan")))
++            v8 = a8[torch.isfinite(a8)]
++            if v8.numel() > 200:
++                m8 = torch.median(v8); s8 = 1.4826 * torch.median(torch.abs(v8 - m8))
++                a8 = (a8 - m8) / torch.clamp(s8, min=1e-4)
++                avg_out.append(a8[0, 0].to(torch.float16).cpu().numpy())
++            else:
++                avg_out.append(None)
++        except Exception:
++            avg_out.append(None)
+     if POOL_MODE == "avg":
+         # gen 18: mean-pool the matched-filter S/N (keeps ~all of a point source's S/N at 1"; max-pool kept ~55-80 %)
+         okf = okd.float()
+@@ -285,6 +313,7 @@
+     from astropy.wcs import WCS
+     import fastfits
+     maps, fw, sg, skyh = [], [], [], []
++    maps2 = []
+     try:
+         hi = fits.open(ipath, memmap=False)
+         hm = fits.open(mpath, memmap=False)
+@@ -342,10 +371,12 @@
+             if not (1.5 < fwhm < 15):
+                 fwhm = 4.0
+             sl_ = []
+-            pm = snr_pooled(img, msk, fwhm, sig_out=sl_)
++            ao_ = [] if LMAP else None
++            pm = snr_pooled(img, msk, fwhm, sig_out=sl_, avg_out=ao_)
+             if pm is None:
+                 continue
+             maps.append((ccd_geom(WCS(h), img.shape), pm))
++            maps2.append(ao_[0] if ao_ else None)
+             fw.append(fwhm)
+             sg += sl_
+             if hnum(h, "SKYSIGMA") is not None and hnum(h, "SKYSIGMA") > 0:
+@@ -357,4 +388,4 @@
+     # sky noise: header SKYSIGMA if present on the CCDs, else the measured robust pixel noise
+     sky = float(np.median(skyh)) if skyh else (float(np.median(sg)) if sg else np.nan)
+     return dict(ei=ei, maps=maps, fwhm=float(np.median(fw)) if fw else np.nan, err=None,
+-                zp=zp, sky=sky)
++                zp=zp, sky=sky, maps2=maps2)

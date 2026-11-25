@@ -1,0 +1,80 @@
+--- tmp/arm_base/stackd/finder.py	2026-11-08 14:25:14
++++ workspace/submission/stackd/finder.py	2026-11-08 17:44:28
+@@ -1197,6 +1197,29 @@
+     oo = oo_all[:NSEED] + xs_[:NXS]
+     if xs_:
+         log(f"fstk ext seeds: {min(len(xs_), NXS)} of {len(xs_)} rows appended after the {min(NSEED, len(oo_all))} regular seeds")
++    # gen 140 (TNO_FSTX_ILV, default 1; 0 = gen139): the extension rows above sit at state positions after ALL regular
++    # seeds, and refinement order is seed_sc = -position, so on CUDA (NSEED = 18000, plus interleaved night / n3 / pstk
++    # seeds, ~30000 slots) they come after every regular seed and a deadline-bound refinement never reaches them.  Give
++    # extension row r (score order) the refinement slot right after the last regular seed of within-window rank
++    # <= r x TNO_FSTX_ILV_SLOW, i.e. the round-robin slot of a window of its own.  ORDER ONLY: same seeds, same states,
++    # same kinds; only seed_sc (-> order_) of the extension rows changes.  Any failure -> gen139 order.
++    ilv_sc = None
++    try:
++        nreg_ = min(NSEED, len(oo_all)); nx_ = min(len(xs_), NXS)
++        if os.environ.get("TNO_FSTX_ILV", "1") != "0" and nx_ > 0 and nreg_ > 0:
++            slw_ = float(os.environ.get("TNO_FSTX_ILV_SLOW", "1.0") or 1.0)
++            rkr_ = np.array([rk[j] for j in oo_all[:nreg_]], float)      # non-decreasing (oo_all is sorted by rk)
++            pos_ = np.searchsorted(rkr_, np.arange(nx_, dtype=float) * slw_, side="right")   # regular seeds before row r
++            ilv_sc = np.r_[-np.arange(nreg_, dtype=float),
++                           -(np.maximum(pos_, 1) - 1).astype(float) - 0.1 - 1e-6 * np.arange(nx_) / max(nx_, 1)]
++            if len(ilv_sc) != len(oo) or not np.all(np.isfinite(ilv_sc)):
++                ilv_sc = None
++            else:
++                log(f"fstx ilv: {nx_} ext rows interleaved (slow {slw_:g}): ext row 0/100/1000/last after regular seed "
++                    f"{[int(pos_[min(i_, nx_ - 1)]) for i_ in (0, 100, 1000, nx_ - 1)]} of {nreg_} (gen139: all after {nreg_})")
++    except Exception as ex:
++        log("fstx ilv failed:", repr(ex)[:200])
++        ilv_sc = None
+     # gen 102: window/deep peaks past the NSEED cut are kept (up to TNO_XTRA x NSEED more, same round-robin order) and
+     # refined after every regular seed if time remains before ref_deadline (the Mac run finished ~95 s early with all
+     # seed caps full).  They are kind 3, so they stay outside the window-seed p null.  TNO_XTRA=0 = gen101.
+@@ -1245,6 +1268,8 @@
+         except Exception as ex:
+             log("fstk dump failed:", repr(ex)[:200])
+     seed_sc = -np.arange(len(best_all), dtype=float)     # refinement order = round-robin order above
++    if ilv_sc is not None and len(ilv_sc) == len(best_all):
++        seed_sc = ilv_sc.copy()
+     # gen 12e: linker candidates (wrapper passes their OUT file in TNO_SEEDS) are refined first, on all exposures,
+     # so the wrapper's merge can confirm (boost) them with pixel-level evidence or correct their orbits.
+     Ls = []
+@@ -1379,6 +1404,12 @@
+             log("night seeds failed:", repr(ex)[:300])
+     if len(skind) != len(states):
+         skind = np.r_[np.zeros(len(Ls), int), np.full(len(states) - len(Ls), 2)]
++    fx_states_ = None     # gen 140: state indices of the fstk extension rows (window seeds are the last len(best_all) states here)
++    try:
++        if ilv_sc is not None or (len(oo) > min(NSEED, len(oo_all))):
++            fx_states_ = len(states) - len(best_all) + np.arange(min(NSEED, len(oo_all)), len(oo))
++    except Exception:
++        fx_states_ = None
+     try:
+         if len(sdeep) and sdeep.any() and len(states) >= len(sdeep):
+             skind[len(states) - len(sdeep):][sdeep] = 3      # window seeds are the last len(best_all) states
+@@ -1960,6 +1991,7 @@
+         log(f"polish: {nimp} of {len(order_p)} states replaced ({nfix} moved > 2\" somewhere; {nwk_[0]} weak-night stack points) in {time.time() - tp0:.1f}s")
+         return out_
+ 
++    t_ref0_ = time.time()
+     for jj, j in enumerate(order_):
+         if time.time() - T0 > ref_deadline:
+             break
+@@ -1973,6 +2005,17 @@
+             R = np.array(refined)
+             write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3),
+                                             scq=np.array(rscq) if RCLIP > 0 else None), score_states, t_ep))
++    try:   # gen 140: refined fstk extension rows (and what gen139's order would have refined: ext rows were last)
++        if fx_states_ is not None and len(fx_states_):
++            nref_ = len(refined); nst_ = len(order_)
++            dn_ = np.zeros(nst_, bool); dn_[order_[:nref_]] = True
++            pfx_ = np.flatnonzero(np.isin(order_, fx_states_))
++            log(f"fstx ilv: refined {nref_} of {nst_} seeds; ext rows refined {int(dn_[fx_states_].sum())} of {len(fx_states_)} "
++                f"(order positions {int(pfx_.min()) if len(pfx_) else -1}..{int(pfx_.max()) if len(pfx_) else -1}; gen139 order: "
++                f"~{max(0, min(len(fx_states_), nref_ - (nst_ - len(fx_states_))))}); refinement took {time.time() - t_ref0_:.1f}s "
++                f"({nref_ / max(time.time() - t_ref0_, 1e-3):.1f} seeds/s); ILV {'on' if ilv_sc is not None else 'off'}")
++    except Exception as ex:
++        log("fstx ilv log failed:", repr(ex)[:200])
+     try:
+         nref_ = len(refined)
+         if rbgseed_moved is not None:

@@ -1,0 +1,108 @@
+--- history/gen123/submission/stackd/finder.py	2026-11-07 15:04:04
++++ submission/stackd/finder.py	2026-11-07 16:24:36
+@@ -1862,7 +1862,60 @@
+         cands = to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3), boost=False,
+                          scq=np.array(rscq) if RCLIP > 0 else None)
+         sdump_("tocands", cands)
+-        cands = dedup(cands, score_states, t_ep)
++
++        def rbg_cap(cs):   # gen 124 (TNO_RBGCAP): ring background decides which rows make the 200 cap (membership only)
++            base = dedup(cs, score_states, t_ep)
++            if os.environ.get("TNO_RBGCAP", "1") == "0" or os.environ.get("TNO_RBG", "1") == "0" or len(cs) <= 200 \
++                    or time.time() - T0 > budget * float(os.environ.get("TNO_RBGCAP_DL", "0.97")):
++                return base
++            try:
++                t_rc = time.time()
++                rk_a = np.array(rkd); rs_a = np.array(rsc, float)
++                nm_ = k2null(rk_a) if (rk_a == 2).sum() >= 30 else (rk_a >= 2)
++                if int(nm_.sum()) < 30:
++                    return base
++                nul = R[nm_][np.random.default_rng(11).permutation(int(nm_.sum()))[:400]]
++                tn = rs_a[nm_]; st_ = 1.4826 * float(np.median(np.abs(tn - np.median(tn)))) + 1e-3
++                M_ = int(os.environ.get("TNO_RBGCAP_M", "1000")); PROT = int(os.environ.get("TNO_RBGCAP_PROT", "50"))
++                W_ = float(os.environ.get("TNO_RBGCAP_W", "2.0")); T_ = float(os.environ.get("TNO_RBG_T", "2.0"))
++                pp = np.clip(np.array([float(c_["p"]) for c_ in cs]), 1e-4, 0.999)
++                order = np.argsort(-pp, kind="stable"); top = order[:M_]
++                bn = ring_bg(nul, CH=200); bc = ring_bg(np.array([cs[j]["state"] for j in top], float), CH=200)
++                mb = float(np.median(bn)); sb = max(1.4826 * float(np.median(np.abs(bn - mb))), 0.3)
++                thr = max(mb + T_ * sb, 0.5)
++                pen = W_ * np.maximum(bc - thr, 0.0) / st_
++                pen[:PROT] = 0.0
++                key = 4.5 + 0.8 * np.log(pp / (1 - pp))
++                key[top] -= pen
++                cs2 = [dict(c_) for c_ in cs]
++                for k_, j in enumerate(top):
++                    cs2[j]["rbg0"] = float(bc[k_])
++                sel = dedup([cs2[j] for j in np.argsort(-key, kind="stable")], score_states, t_ep, presorted=True)
++                sel = sorted(sel, key=lambda c_: -c_["p"])
++                ib = set(); bset = {id(b_) for b_ in base}
++                for j in range(len(cs)):
++                    if id(cs[j]) in bset:
++                        ib.add(j)
++                inv = {id(cs2[j]): j for j in range(len(cs2))}
++                isel = {inv[id(c_)] for c_ in sel}
++                newin = isel - ib
++                pcap = float(base[-1]["p"]) if base else 1.0
++                npn = 0
++                if os.environ.get("TNO_RBGCAP_PNCAP", "1") != "0":
++                    for c_ in sel:
++                        if inv[id(c_)] in newin and "pn" in c_:
++                            if float(c_["pn"]) > 0.3:
++                                npn += 1
++                            c_["pn"] = min(float(c_["pn"]), pcap)
++                pin = [float(cs[j]["p"]) for j in newin]
++                log(f"rbgcap: thr {thr:.2f} st {st_:.2f}; above thr {int((bc > thr).sum())} of top {len(top)}; "
++                    f"swapped in {len(newin)} (p {min(pin) if pin else 0:.3f}..{max(pin) if pin else 0:.3f}, pn>0.3 {npn}), "
++                    f"out {len(ib - isel)}; {time.time() - t_rc:.1f}s")
++                return sel
++            except Exception as ex:
++                log("rbgcap failed:", repr(ex)[:200])
++                return base
++        cands = rbg_cap(cands)
+         sdump_("dedup", cands)
+ 
+         def n3boost(cs):   # gen 79: apply the n3 p path after any p reassignment (cv_rerank hands out sorted p values)
+@@ -2816,8 +2869,18 @@
+ 
+ 
+ BAND_F = {"g": 0.8, "r": 1.0, "i": 1.0, "z": 0.8, "Y": 0.5, "VR": 1.15}
++# gen 124 (TNO_COLW): TNOs are red (g-r ~0.75, r-i ~0.3, r-z ~0.45 mag), so the expected S/N of a body in an exposure is
++# depth x colour flux ratio, not depth alone.  Weighting S/N maps by expected S/N is the matched stack; ignoring colour
++# overweights g.  Factors are fluxes relative to r (z/Y capped for fringing).  TNO_COLW is a strength exponent; 0 = gen123.
++COLW = float(os.environ.get("TNO_COLW", "1") or 0)
++TNO_COL = {"g": 0.55, "r": 1.0, "i": 1.25, "z": 1.4, "Y": 1.4, "VR": 0.85}
+ 
+ 
++def colf(b):
++    b = (b or "").strip()
++    return TNO_COL.get(b, TNO_COL.get(b[:1], 1.0)) ** COLW
++
++
+ def depth_weights(rows, res, use):
+     """gen 19: per-exposure depth weight ~ expected S/N of a fixed-magnitude point source.
+     Primary: 10^(0.4 zp) / (sky sigma * fwhm) (zp from the image header, else exposures.csv magzero; sky sigma
+@@ -2850,15 +2913,22 @@
+     both = [i for i in prim if i in fb]
+     k = float(np.median([prim[i] / fb[i] for i in both])) if both else 1.0
+     raw = np.array([prim[i] if i in prim else k * fb[i] for i in use])
++    if COLW > 0:
++        try:
++            raw = raw * np.array([colf(rows[i].get("band")) for i in use])
++            log("colour weights (TNO_COLW=%g): %s" % (COLW, " ".join(sorted({"%s%.2f" % ((rows[i].get("band") or "").strip(),
++                                                                               colf(rows[i].get("band"))) for i in use}))))
++        except Exception as ex:
++            log("colour weights failed:", repr(ex)[:200])
+     raw = raw / np.median(raw)
+     w = np.clip(raw, 0.25, 2.5)
+     log(f"depth weights: {len(prim)}/{len(use)} exposures with zero point")
+     return {i: float(x) for i, x in zip(use, w)}
+ 
+ 
+-def dedup(cands, score_states, t_ep):
++def dedup(cands, score_states, t_ep, presorted=False):
+     """Drop candidates whose position at t_ep is within 4" of a better one (same body)."""
+-    cands = sorted(cands, key=lambda c: -c["p"])
++    cands = list(cands) if presorted else sorted(cands, key=lambda c: -c["p"])
+     keep, dirs = [], []
+     for c in cands:
+         s = np.array(c["state"])

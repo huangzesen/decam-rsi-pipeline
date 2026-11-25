@@ -1,0 +1,108 @@
+diff -ru history/gen134/submission/stackd/finder.py submission/stackd/finder.py
+--- history/gen134/submission/stackd/finder.py	2026-11-08 00:47:16
++++ submission/stackd/finder.py	2026-11-08 09:47:15
+@@ -21,6 +21,21 @@
+ EPS = math.radians(23.4392911)
+ 
+ 
++
++# gen 135 (TNO_DORD_K, default 1.6; 1 = gen134): distance-slice priority for deadline-bound searches.  Was symmetric in
++# log(d/42); real TNOs (and the bright, findable ones even more: flux ~ d^-4) sit inside ~48 au (the Kuiper cliff), and
++# plutinos at 30-36 au are ~1 mag brighter than classicals, so slices beyond 42 au are pushed back by a factor K.
++# Order only: identical results whenever every slice is searched (except pstk / night seeds, whose running best-dict
++# pruning depends on visit order, marginal keys only).
++def _dkey(d):
++    try:
++        K_ = float(os.environ.get("TNO_DORD_K", "1.6"))
++    except Exception:
++        K_ = 1.6
++    if not (K_ > 0):
++        K_ = 1.6
++    return math.log(42.0 / d) if d <= 42.0 else K_ * math.log(d / 42.0)
++
+ def device():
+     import torch
+     if torch.cuda.is_available():
+@@ -547,7 +562,7 @@
+         if not g:
+             g = [40.0]
+         # prior order: classical belt first
+-        return sorted(g, key=lambda d: abs(math.log(d / 42.0)))
++        return sorted(g, key=_dkey)
+ 
+     # gen 19: up to NPN frames per night in the window search (was 3, which dropped most of a dense night's depth;
+     # frames are already co-adds of <= GMAX exposures).  Default 8 on CUDA, 3 elsewhere; TNO_NPN overrides.
+@@ -684,7 +699,7 @@
+         lo, hi = 1 / DEEP_DMAX, 1 / DEEP_DMIN
+         nst = max(1, int(math.ceil((hi - lo) / step)))
+         g = [1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)]
+-        return sorted(g, key=lambda d: abs(math.log(d / 42.0)))
++        return sorted(g, key=_dkey)
+ 
+     def deep_cost(sel):
+         # frame-adds of a deep window: hypotheses (restricted disc, deep distances) x collapsed co-adds
+@@ -2227,7 +2242,7 @@
+     step = float(os.environ.get("TNO_PSTK_DSTEP", "6.0")) * ARCR / rmax   # gen 104: 3 -> 6 (41 distances, CEM refines d)
+     lo = 1 / float(os.environ.get("TNO_NS_DMAX", "75")); hi = 1 / float(os.environ.get("TNO_NS_DMIN", "28"))
+     nst = max(1, int(math.ceil((hi - lo) / step)))
+-    dg = sorted([1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)], key=lambda d: abs(math.log(d / 42.0)))
++    dg = sorted([1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)], key=_dkey)
+     z0 = TF0[2]
+     pole = np.array([0, -math.sin(EPS), math.cos(EPS)])
+     pairs = [(a, b) for a in range(nN) for b in range(a + 1, nN) if tN[b] - tN[a] >= DTMIN]
+@@ -2710,7 +2725,7 @@
+     step = float(os.environ.get("TNO_NS_DSTEP", "3.0")) * ARCR / rmax
+     lo = 1 / float(os.environ.get("TNO_NS_DMAX", "75")); hi = 1 / float(os.environ.get("TNO_NS_DMIN", "28"))
+     nst = max(1, int(math.ceil((hi - lo) / step)))
+-    dg = sorted([1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)], key=lambda d: abs(math.log(d / 42.0)))
++    dg = sorted([1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)], key=_dkey)
+     log_(f"night seeds: {nN} nights, {len(dg)} distances")
+     z0 = TF0[2]
+     pole = np.array([0, -math.sin(EPS), math.cos(EPS)])
+diff -ru history/gen134/submission/stackd/fstk.py submission/stackd/fstk.py
+--- history/gen134/submission/stackd/fstk.py	2026-11-08 01:04:27
++++ submission/stackd/fstk.py	2026-11-08 09:47:15
+@@ -16,6 +16,16 @@
+ import numpy as np
+ 
+ 
++
++def _dkey(d):   # gen 135: see stackd/finder.py _dkey (TNO_DORD_K)
++    try:
++        K_ = float(os.environ.get("TNO_DORD_K", "1.6"))
++    except Exception:
++        K_ = 1.6
++    if not (K_ > 0):
++        K_ = 1.6
++    return math.log(42.0 / d) if d <= 42.0 else K_ * math.log(d / 42.0)
++
+ def fstk_search(torch, F, dev, maps, obs, t, wf, DW, TF0, TF0_t, x0, y0, PIX, SP, z0, pole, GM, tframe, T0,
+                 deadline, log, fi0, C_AU=173.1446, orbit=None):
+     rows_out, frames_out = [], []
+@@ -97,7 +107,7 @@
+     lo, hi = 1 / DMAX, 1 / DMIN
+     nst = max(1, int(math.ceil((hi - lo) / step)))
+     dg = [1 / (lo + (k + 0.5) * (hi - lo) / nst) for k in range(nst)]
+-    dg = sorted(dg, key=lambda d: abs(math.log(d / 42.0)))
++    dg = sorted(dg, key=_dkey)
+     DLIST = [float(x) for x in os.environ.get("TNO_FSTK_DLIST", "").split(",") if x.strip()]   # debug: explicit distances
+     if DLIST:
+         dg = DLIST
+@@ -129,7 +139,7 @@
+     # gen 127 (TNO_FSTK_ADAPT, default 0 = gen126, NOT shipped: lost the threshold body B9 in a paired run, see NOTES): coverage-adaptive distance grid.  After ADN slices, predict the
+     # time the remaining slices need (measured warp + other overhead per slice, + prior hypotheses / measured hyp/s);
+     # if they do not fit in the deadline, re-plan the remaining slices once on the smallest coarser step (x1.25 .. x AMAX)
+-    # that fits (else AMAX), skipping new slices within half a new step of a done one, same closeness-to-42-au order.
++    # that fits (else AMAX), skipping new slices within half a new step of a done one, same _dkey order (gen 135).
+     # Corrected truth probes (gen127) show a body's d-frame track is within ~0.4 px of linear at half a DSTEP-1 step and
+     # ~0.7 px at half a 1.75 step (B8 stays the slice's #0-1 kept peak at 0.23 au off), while the Mac reaches only
+     # 9-33 of 129 slices; so when time-limited, wider distance coverage beats density.  Identical to gen126 when the
+@@ -179,7 +189,7 @@
+                         n2 = max(1, int(math.ceil((hi - lo) / st2)))
+                         g2 = [1 / (lo + (k + 0.5) * (hi - lo) / n2) for k in range(n2)]
+                         g2 = [x_ for x_ in g2 if all(abs(1 / x_ - 1 / y_) > 0.5 * st2 for y_ in done_d)]
+-                        g2 = sorted(g2, key=lambda x_: abs(math.log(x_ / 42.0)))
++                        g2 = sorted(g2, key=_dkey)
+                         c2 = _cost(g2)
+                         pick_ = (f_, g2, c2)
+                         if c2 <= 0.97 * rem_t:

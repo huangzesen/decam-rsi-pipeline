@@ -1,0 +1,117 @@
+--- $RSI_SANDBOX/r1/gen126/tmp/fstk_gen125.py	2026-11-07 19:49:08
++++ stackd/fstk.py	2026-11-07 20:48:39
+@@ -22,6 +22,8 @@
+     DMIN = float(os.environ.get("TNO_FSTK_DMIN", "30")); DMAX = float(os.environ.get("TNO_FSTK_DMAX", "70"))
+     VLO = float(os.environ.get("TNO_FSTK_VLO", "0.85")); VHI = float(os.environ.get("TNO_FSTK_VHI", "1.12"))
+     ANG = math.radians(float(os.environ.get("TNO_FSTK_ANG", "25")))
++    # gen 126 (TNO_FSTK_TIGHT, default 1; 0 = gen125): canvas margin = shift reach only (see the mx line)
++    TIGHT = os.environ.get("TNO_FSTK_TIGHT", "1") != "0"
+     GSPAN = float(os.environ.get("TNO_FSTK_GSPAN", "0.08"))
+     DCLIP = float(os.environ.get("TNO_FSTK_CLIP", "2.5"))  # gen 107: was 4.0
+     BS = 0
+@@ -119,7 +121,12 @@
+                 q = TD @ ((o_ + rr * z0) / d)
+                 offs.append([q[0] / q[2] / SP, q[1] / q[2] / SP])
+             offs = np.array(offs)
+-            mx = int(np.abs(offs).max() + vmax * mdt + 8)
++            # gen 126 (TNO_FSTK_TIGHT): the kernel only reads canvas pixels (row+P+SY, col+P+SX) for the central H2 x W2
++            # output block, with |SX|,|SY| <= (VHI*vcs+dv)*mdt+0.5 < vmax*mdt (rescore/probes add <= 1 px + 1 dv, clamped).
++            # The footprint offsets |offs| (parallax, ~300 px at 42 au) were never read but widened WD/HD, i.e. the
++            # memory-bound kernel length Hc*WD and the HD*WD warp.  Row coordinates (xx+P-(WD-1)/2)*SP do not depend on P.
++            mx_old = int(np.abs(offs).max() + vmax * mdt + 8)
++            mx = int(vmax * mdt + 8) if TIGHT else mx_old
+             HD, WD = H2 + 2 * mx, W2 + 2 * mx
+             TD_t = torch.tensor(TD, dtype=torch.float32, device=dev)
+             gxd = (torch.arange(WD, device=dev, dtype=torch.float32) - (WD - 1) / 2) * SP
+@@ -167,6 +174,12 @@
+                         m_ = float(torch.median(v_))
+                         Dm3[k_] = torch.where(Dm3[k_] != 0, Dm3[k_] - m_, Dm3[k_])
+                     del v_
++            # gen 126 experiment (TNO_FSTK_DIL, default 0 = off): 3x3 max filter on the coarse co-adds (not Dm3), so a
++            # track misaligned by up to 1 pooled px in some co-adds keeps its signal (probes show the coarse stack only
++            # survives within ~0.04 au of the true distance).  Untested in full runs; see NOTES.
++            if os.environ.get("TNO_FSTK_DIL", "0") != "0":
++                for k_ in range(K):
++                    Dm[k_] = F.max_pool2d(Dm[k_][None, None].float(), 3, 1, 1)[0, 0].half()
+             t_warp = time.time() - t_d0
+             # velocity grid (search px / day) inside the prior, ordered by closeness to prograde circular
+             vc = np.cross(pole, w0); vc = vc / np.linalg.norm(vc) * math.sqrt(GM / d)
+@@ -357,7 +370,7 @@
+                     log("fstk probe failed:", repr(ex)[:120])
+             log(f"fstk d={d:.2f}: {nh}/{nprior} hyps in {dtc:.1f}s ({nh / max(dtc, 1e-6):.0f} hyp/s, K {K}, "
+                 f"{'int8 q%.2f' % qs if use8 else 'fp16'}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
+-                f"peaks>5/6/7 {nab}, kept {len(sc)}; slice {di + 1}/{len(dg)} at {time.time() - T0:.0f}s of deadline {deadline:.0f}s")
++                f"peaks>5/6/7 {nab}, kept {len(sc)}; slice {di + 1}/{len(dg)} at {time.time() - T0:.0f}s of deadline {deadline:.0f}s; mx {mx} (old {mx_old})")
+             del Dq, bs, pk
+             Dm = None; Dm3 = None
+         except Exception as ex:
+--- $RSI_SANDBOX/r1/gen126/tmp/stackd_finder_gen125.py	2026-11-07 19:49:39
++++ stackd/finder.py	2026-11-07 19:49:39
+@@ -802,7 +802,12 @@
+                   q = TD @ ((o + rr * z0) / d)
+                   offs.append([q[0] / q[2] / SP, q[1] / q[2] / SP])
+               offs = np.array(offs)
+-              mx = int(np.abs(offs).max() + vmax * mdt + 8)
++              # gen 126 (TNO_WIN_TIGHT): shifts are <= (vmax+dv)*mdt+0.5 < vmax*mdt+8 and only the central H2 x W2 block is
++              # output, so the footprint offsets |offs| only widened the canvas (warp + slice cost).  0 = gen125.
++              if os.environ.get("TNO_WIN_TIGHT", "1") != "0":
++                  mx = int(vmax * mdt + 8)
++              else:
++                  mx = int(np.abs(offs).max() + vmax * mdt + 8)
+               HD, WD = H2 + 2 * mx, W2 + 2 * mx
+               # d-frame maps
+               TD_t = torch.tensor(TD, dtype=torch.float32, device=dev)
+--- $RSI_SANDBOX/r1/gen126/tmp/xt/submission_base/finder.py	2026-11-07 19:40:28
++++ finder.py	2026-11-07 19:50:07
+@@ -27,6 +27,11 @@
+ # gen 78: stack-confirmed linker candidates (LS) whose matched stack p beats their own linker p compete in the
+ # stack-only interleave list instead of the linker tail (0 = gen077).
+ LSRANK = int(float(os.environ.get("TNO_LSRANK", "1") or 0))
++# gen 126: in the interleave tail, linker rows stackd did NOT confirm (src "L": stackd refined every linker seed but no
++# stack row matched) get one slot per LPURE stack-only rows; confirmed LS rows keep ILEAVE and go first in the
++# linker list.  Order only (sorted p reassigned).  Needs >= LPURE_MINS stack-only rows.  0 = gen125.
++LPURE = int(float(os.environ.get("TNO_LPURE", "0") or 0))
++LPURE_MINS = int(float(os.environ.get("TNO_LPURE_MINS", "50") or 0))
+ # gen 81: a linker candidate from the linker's own shift-and-stack (kind "stk": state fitted to 2 seed detections +
+ # model-predicted positions elsewhere) that stackd matched takes stackd's pixel-refined state (0 = gen080).
+ ADOPT = int(float(os.environ.get("TNO_LSADOPT", "1") or 0))
+@@ -132,13 +137,32 @@
+     nLS = sum(c.get("src") == "LS" for c in S)
+     if nLS:
+         S = sorted(S, key=lambda c: -max(float(c["p"]), float(c.get("pS", 0.0))))
+-    order, i, j = list(top), 0, 0
+-    while i < len(L) or j < len(S):
+-        for _ in range(ILEAVE):
+-            if j < len(S):
+-                order.append(S[j]); j += 1
+-        if i < len(L):
+-            order.append(L[i]); i += 1
++    def _ilv(L_, S_, kp):
++        o_, i, j = [], 0, 0
++        while i < len(L_) or j < len(S_):
++            k_ = kp if (i < len(L_) and L_[i].get("src") == "L") else ILEAVE
++            for _ in range(k_):
++                if j < len(S_):
++                    o_.append(S_[j]); j += 1
++            if i < len(L_):
++                o_.append(L_[i]); i += 1
++        return o_
++    nS0 = sum(c.get("src") == "S" for c in S)
++    if LPURE > ILEAVE and nS0 >= LPURE_MINS:
++        L2 = [c for c in L if c.get("src") != "L"] + [c for c in L if c.get("src") == "L"]
++        new = _ilv(L2, S, LPURE)
++        try:
++            old = _ilv(L, S, ILEAVE)
++            def _cnt(o):
++                t_ = (list(top) + o)[:25]
++                return "/".join(str(sum(c.get("src") == s_ for c in t_)) for s_ in ("L", "LS", "S"))
++            log(f"lpure: {sum(c.get('src') == 'L' for c in L)} unconfirmed linker-tail rows at 1 per {LPURE} stack rows; "
++                f"top-25 L/LS/S {_cnt(old)} -> {_cnt(new)}")
++        except Exception as ex:
++            log("lpure log failed", ex)
++        order = list(top) + new
++    else:
++        order = list(top) + _ilv(L, S, ILEAVE)
+     log(f"interleave: {len(top)} strong, {len(L)} linker tail, {len(S)} stack-only ({nLS} stack-confirmed LS moved in)")
+     return [dict(c, p=p) for c, p in zip(order, ps)]
+ 

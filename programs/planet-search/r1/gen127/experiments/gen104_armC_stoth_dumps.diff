@@ -1,0 +1,108 @@
+diff -ru -x N $RSI_SANDBOX/r1/gen104/workspace/submission/stackd/finder.py sub/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen104/workspace/submission/stackd/finder.py	2026-11-06 00:46:50
++++ sub/stackd/finder.py	2026-11-06 04:52:21
+@@ -48,7 +48,14 @@
+ 
+ 
+ def write_out(path, cands):
+-    cands = sorted(cands, key=lambda c: -c["p"])[:200]
++    cands = sorted(cands, key=lambda c: -c["p"])
++    if os.environ.get("TNO_ALL_DUMP") and len(cands) > 200:   # gen 104 diagnostics: every candidate before the cut
++        try:
++            with open(os.environ["TNO_ALL_DUMP"], "w") as f:
++                json.dump({"candidates": cands[:5000]}, f)
++        except Exception:
++            pass
++    cands = cands[:200]
+     tmp = path + ".tmp"
+     with open(tmp, "w") as f:
+         json.dump({"candidates": cands}, f)
+@@ -298,6 +305,12 @@
+         o_t = np.argsort(t)
+         tbin = np.empty(len(t), int)
+         tbin[o_t] = np.r_[0, np.cumsum(np.diff(t[o_t]) > 0.06)]
++    # gen 104 (TNO_STOTH, default off): a frame's static mask ignores its OWN time bin (a pixel is static for frame n
++    # when it is lit in >= SNEED OTHER bins).  Measured on inj7c: 12-17 % of injected-body frames read exactly 0 at
++    # the true position vs a 7.4 % static sky fraction, because a mover lights its own bin and so needs only ONE
++    # noise/junk excursion in another bin to be masked.  Stars (lit in every bin) stay masked.
++    STOTH = os.environ.get("TNO_STOTH", "0") == "1"
++    bin_lit = {}
+     for u_ in np.unique(tbin):
+         idx = np.flatnonzero(tbin == u_)
+         b = torch.zeros((H, W), dtype=torch.bool, device=dev)
+@@ -305,6 +318,8 @@
+             b |= maps[n] > 4
+         b = F.max_pool2d(b[None, None].half(), 3, 1, 1)[0, 0] > 0
+         nn += b.to(torch.int16)
++        if STOTH:
++            bin_lit[int(u_)] = b
+     # gen 20: TNO_SNEED (default 2 = old).  3 (with >= 4 bins) keeps faint movers from being zeroed by one noise
+     # excursion in another bin, but measured no gain on the injected test (A 11/15 vs 12/15, B 0 either way).
+     nbin_ = len(np.unique(tbin))
+@@ -452,8 +467,23 @@
+             del Tm, Vm
+         except Exception as ex:
+             log("template failed, skipped:", repr(ex)[:200])
+-    maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
+-    del nn, static
++    done_st_ = False
++    if STOTH and len(bin_lit) == len(np.unique(tbin)):
++        try:
++            zf_ = 0.0
++            for n in range(N):
++                st_n = (nn - bin_lit[int(tbin[n])].to(torch.int16)) >= SNEED
++                zf_ += float(st_n.float().mean())
++                maps[n] = torch.where(st_n, torch.zeros_like(maps[n]), maps[n]).clamp_(-3, 5)
++                del st_n
++            done_st_ = True
++            log(f"stoth: per-frame static mask excluding own bin, mean fraction {zf_ / max(N, 1):.4f} "
++                f"(global {float(static.float().mean()):.4f})")
++        except Exception as ex:
++            log("stoth failed, global static mask:", repr(ex)[:200])
++    if not done_st_:
++        maps = torch.where(static[None], torch.zeros_like(maps), maps).clamp_(-3, 5)
++    del nn, static, bin_lit
+     write_out(a.out, [])
+ 
+     # ---------------------------------------------------------------- 3. search window
+@@ -1195,6 +1225,40 @@
+         if len(ns) < 3:
+             return np.full(len(v), -9.0)
+         return np.sort(np.stack(ns, 1), 1)[:, -3]
++
++    # gen 104 diagnostics (opt-in, default off): TNO_SEED_DUMP=path writes every unrefined seed (+ the extra
++    # window peaks) as a candidates json (p = 1 - rank/len, 'kind' field); TNO_DIAG_STATES=json list of
++    # {state, epoch_mjd} -> TNO_DIAG_OUT gets their per-frame values on stackd's own maps (forced photometry).
++    try:
++        if os.environ.get("TNO_SEED_DUMP"):
++            dd_ = []
++            for j_ in range(len(states)):
++                dd_.append(dict(epoch_mjd=float(t_ep), state=[float(x_) for x_ in states[j_]],
++                                p=float(1 - j_ / max(len(states), 1)), kind=int(skind[j_])))
++            for j_, r_ in enumerate(best_extra):
++                try:
++                    s_, ep_ = to_state(r_)
++                    x_ = orbit.propagate(s_[:3], s_[3:], np.array([t_ep - ep_, t_ep - ep_ + 1e-3]))
++                    dd_.append(dict(epoch_mjd=float(t_ep), state=[float(q_) for q_ in np.r_[x_[0], (x_[1] - x_[0]) / 1e-3]],
++                                    p=float(-1e-3 * (j_ + 1)), kind=5, sc=float(r_[0])))
++                except Exception:
++                    pass
++            json.dump(dict(candidates=dd_), open(os.environ["TNO_SEED_DUMP"], "w"))
++            log(f"seed dump: {len(dd_)} seeds")
++        if os.environ.get("TNO_DIAG_STATES"):
++            ds_ = json.load(open(os.environ["TNO_DIAG_STATES"]))
++            S_ = []
++            for c_ in ds_:
++                s_ = np.array(c_["state"], float); dt_ = t_ep - float(c_["epoch_mjd"])
++                x_ = orbit.propagate(s_[:3], s_[3:], np.array([dt_, dt_ + 1e-3]))
++                S_.append(np.r_[x_[0], (x_[1] - x_[0]) / 1e-3])
++            v_, c_ = score_states(np.array(S_))
++            json.dump(dict(t=t.tolist(), night=night.tolist(), wf=wf.tolist(), v=v_.tolist(), c=c_.tolist(),
++                           total=total(v_, c_).tolist(), n3=night3(v_, c_).tolist()),
++                      open(os.environ["TNO_DIAG_OUT"], "w"))
++            log("diag states written")
++    except Exception as ex:
++        log("diag dump failed:", repr(ex)[:200])
+ 
+     def to_cands(S, sc, nn_, kd=None, n3=None, boost=True):
+         out = []

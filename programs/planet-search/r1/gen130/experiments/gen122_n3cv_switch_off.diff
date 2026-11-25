@@ -1,0 +1,78 @@
+1852c1852,1853
+<                 cands = cv_rerank(cands, R, np.array(rkd), np.array(rsc), cem, score_states, total, t, night, nights_u, budget, T0, log, zout=CVZ)
+---
+>                 cands = cv_rerank(cands, R, np.array(rkd), np.array(rsc), cem, score_states, total, t, night, nights_u, budget, T0, log, zout=CVZ,
+>                                   night3=night3)
+2950a2952,2968
+>     try:   # gen 122 (TNO_N3CV): held-out n3 z from cv_rerank as an order-only max channel for weight-2-like tracks.
+>         if os.environ.get("TNO_N3CV", "0") != "0":
+>             OFF3 = float(os.environ.get("TNO_N3CV_OFF", "0.5"))
+>             RK3 = int(float(os.environ.get("TNO_N3CV_RK", "10")))
+>             ZT3 = float(os.environ.get("TNO_ZCCV_T", "3.0"))
+>             z3 = np.array([float(c.get("z3q", -np.inf)) - OFF3 for c in cands])
+>             # rows that ZCCV demoted (held-out clipped stack failed) get no lift
+>             dem = np.array([("zq" in c) and float(c["zq"]) < ZT3 for c in cands])
+>             z3 = np.where(dem, -np.inf, z3)
+>             if np.isfinite(z3).any() and len(key) > RK3:
+>                 cap = float(np.sort(key)[::-1][RK3])     # a lifted row cannot enter the top RK3 by this channel
+>                 z3 = np.minimum(z3, cap)
+>                 up3 = z3 > key
+>                 key = np.where(up3, z3, key)
+>                 log_(f"n3cv rankx: {int(np.isfinite(z3).sum())} rows with z3q, {int(up3.sum())} lifted (cap {cap:.2f})")
+>     except Exception as ex:
+>         log_("n3cv rankx failed:", repr(ex)[:200])
+2973c2991
+< def cv_rerank(cands, R, rkd, rsc, cem, score_states, total, t, night, nights_u, budget, T0, log_, zout=None):
+---
+> def cv_rerank(cands, R, rkd, rsc, cem, score_states, total, t, night, nights_u, budget, T0, log_, zout=None, night3=None):
+2999a3018,3022
+>     # gen 122 (TNO_N3CV, default 0 = gen121; 1 = on): weight-2 bodies are defined by n3 (3rd-best one-night stack S/N), but
+>     # rankx orders tracks by all-exposure stack z only.  Measure a HELD-OUT n3 here (each exposure scored by the state
+>     # fitted on the other half, spliced) against the same kind-2 null; rankx may use it as an extra max() channel.
+>     N3CV = os.environ.get("TNO_N3CV", "0") != "0" and night3 is not None
+>     N3CV_MIN = float(os.environ.get("TNO_N3CV_MIN", "3.0"))   # in-sample n3 must also reach this (raw S/N)
+3012c3035
+<                 out.append(((za + zb) / math.sqrt(2), (zaq + zbq) / math.sqrt(2)))
+---
+>                 o_ = [(za + zb) / math.sqrt(2), (zaq + zbq) / math.sqrt(2)]
+3014c3037,3047
+<                 out.append(((za + zb) / math.sqrt(2), np.nan))
+---
+>                 o_ = [(za + zb) / math.sqrt(2), np.nan]
+>             n3h = np.nan
+>             if N3CV:
+>                 try:   # v[0] (fit on A) is held out on B and v[1] (fit on B) on A: splice -> every exposure held out
+>                     vh = np.where(mB[None], v[0:1], v[1:2]); ch = np.where(mB[None], c[0:1], c[1:2])
+>                     n3h = float(night3(vh, ch)[0])
+>                     if n3h <= -8.9:
+>                         n3h = np.nan
+>                 except Exception:
+>                     n3h = np.nan
+>             out.append(tuple(o_ + [n3h]))
+3026a3060
+>     cv3n, cv3 = [], {}
+3031c3065
+<         cvn.append(r_[0]); cvqn.append(r_[1])
+---
+>         cvn.append(r_[0]); cvqn.append(r_[1]); cv3n.append(r_[2])
+3046c3080
+<         cv = r_[0]; cvq[j] = r_[1]
+---
+>         cv = r_[0]; cvq[j] = r_[1]; cv3[j] = r_[2]
+3076a3111,3126
+>     if N3CV:
+>         try:
+>             q3 = np.array(cv3n, float); q3 = q3[np.isfinite(q3)]
+>             if len(q3) >= 20:
+>                 m3 = float(np.median(q3)); s3 = max(1.4826 * float(np.median(np.abs(q3 - m3))), 0.5)
+>                 n3in = night3(vt[len(nul):], ct[len(nul):]) if len(Sc) else np.zeros(0)
+>                 nz3 = 0
+>                 for k, j in enumerate(Enew):
+>                     o = out[k]
+>                     if np.isfinite(cv3.get(j, np.nan)) and n3in[j] >= N3CV_MIN:
+>                         o["z3q"] = float((cv3[j] - m3) / s3); nz3 += 1
+>                 log_(f"n3cv: held-out n3 null median {m3:.2f} MAD {s3:.2f} (n {len(q3)}); {nz3} rows got z3q")
+>             else:
+>                 log_(f"n3cv: only {len(q3)} null n3 values; skipped")
+>         except Exception as ex:
+>             log_("n3cv failed:", repr(ex)[:200])

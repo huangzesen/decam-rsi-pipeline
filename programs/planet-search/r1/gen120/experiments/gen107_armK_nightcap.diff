@@ -1,0 +1,154 @@
+diff -ruN -x experiments -x NOTES.md -x __pycache__ -x *.pyc -x *.tmp workspace/submission/stackd/fstk.py tmp/armK/submission/stackd/fstk.py
+--- workspace/submission/stackd/fstk.py	2026-11-06 07:28:37
++++ tmp/armK/submission/stackd/fstk.py	2026-11-06 10:53:06
+@@ -31,6 +31,17 @@
+     DSTEP = float(os.environ.get("TNO_FSTK_DSTEP", "1.0"))     # distance step in units of the dgrid_deep step
+     MAXD = int(os.environ.get("TNO_FSTK_MAXD", "0") or 0)       # debug: at most this many distances
+     CHB = float(os.environ.get("TNO_FSTK_CHMB", "384")) * 1e6   # conv output chunk size (bytes)
++    # gen 107 (armK): bounded-night score.  Each night co-add is winsorized at +-NCLIP x its robust (MAD) sigma before
++    # quantisation, so a single bright night contributes at most NCLIP sigma to any hypothesis (removes the single-night
++    # junk tail of the fstk peaks at ~zero kernel cost).  TNO_FSTK_NCLIP=0 = gen106.
++    try:
++        NCLIP = float(os.environ.get("TNO_FSTK_NCLIP", "2.0") or 0)
++    except Exception:
++        NCLIP = 0.0
++    POOLA = os.environ.get("TNO_FSTK_POOL", "max") == "avg"
++    NSL = float(os.environ.get("TNO_FSTK_NSLOPE", "0.1") or 0)   # slope above the night ceiling (0 = hard clip)
++    RLOO = os.environ.get("TNO_FSTK_RLOO", "1") == "1"       # re-score kept peaks: (sum - max night) * K/(K-1), unclipped
++    RMUL = float(os.environ.get("TNO_FSTK_RMUL", "3"))         # ... over RMUL x NPK clipped peaks, keep the best NPK
+     probes = []
+     try:
+         pf = os.environ.get("TNO_FSTK_PROBE")    # diagnostic only: json list of {state, epoch_mjd, tag}
+@@ -47,7 +58,10 @@
+     # 2" pooled, winsorized maps
+     sm_ = []
+     for i_ in range(0, N, 4):
+-        a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
++        if POOLA:   # armK option: average-pool 1" -> 2" (x2 renormalises 4 ~independent px to unit noise)
++            a_ = F.avg_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0] * 2.0
++        else:
++            a_ = F.max_pool2d(maps[i_:i_ + 4].float()[None], 2, 2)[0]
+         if DCLIP > 0:
+             a_ = a_.clamp_(-DCLIP, DCLIP)
+         sm_.append(a_.half())
+@@ -142,6 +156,29 @@
+                     m_ = float(torch.median(v_))
+                     Dm[k_] = torch.where(Dm[k_] != 0, Dm[k_] - m_, Dm[k_])
+                 del v_
++            Du = None
++            if NCLIP > 0 and RLOO:
++                try:
++                    Du = Dm.clone().reshape(K, -1)      # unclipped co-adds for the exact leave-brightest-night-out rescore
++                except Exception:
++                    Du = None
++            if NCLIP > 0:
++                try:
++                    for k_ in range(K):
++                        v_ = Dm[k_, ::3, ::3].float(); v_ = v_[v_ != 0]
++                        if v_.numel() > 100:
++                            sg_ = 1.4826 * float(torch.median(v_.abs()))
++                            if sg_ > 0:
++                                c_ = NCLIP * sg_
++                                if NSL > 0:   # soft ceiling: slope NSL above c (keeps bright bodies' peaks unique)
++                                    x_ = Dm[k_].float()
++                                    x_ = torch.where(x_ > c_, c_ + NSL * (x_ - c_), torch.where(x_ < -c_, -c_ + NSL * (x_ + c_), x_))
++                                    Dm[k_] = x_.half(); del x_
++                                else:
++                                    Dm[k_] = Dm[k_].clamp(-c_, c_)
++                        del v_
++                except Exception as ex:
++                    log("fstk night clip failed:", repr(ex)[:120])
+             t_warp = time.time() - t_d0
+             # velocity grid (search px / day) inside the prior, ordered by closeness to prograde circular
+             vc = np.cross(pole, w0); vc = vc / np.linalg.norm(vc) * math.sqrt(GM / d)
+@@ -207,8 +244,15 @@
+             yy, xx = torch.nonzero(pk, as_tuple=True)
+             sc = bs[yy, xx]
+             nab = [int((sc > z_).sum()) for z_ in (5.0, 6.0, 7.0)]
+-            if sc.numel() > NPK:
+-                top = torch.topk(sc, NPK).indices
++            try:
++                srt_ = torch.sort(sc, descending=True).values
++                cstat_ = (float(srt_[0]) if len(srt_) else 0.0, float(srt_[min(NPK, len(srt_)) - 1]) if len(srt_) else 0.0)
++                del srt_
++            except Exception:
++                cstat_ = (0.0, 0.0)
++            NPK_ = int(NPK * RMUL) if Du is not None else NPK
++            if sc.numel() > NPK_:
++                top = torch.topk(sc, NPK_).indices
+                 yy, xx, sc = yy[top], xx[top], sc[top]
+             # best hypothesis at each kept peak: re-evaluate every searched hypothesis there (gather)
+             hh = np.zeros(len(sc), np.int64)
+@@ -218,13 +262,30 @@
+                 OFF_t = torch.tensor(OFF[:nh], dtype=torch.int64, device=dev)
+                 for h0 in range(0, nh, 256):
+                     v_ = torch.zeros((min(256, nh - h0), len(sc)), device=dev)
++                    Dg_ = Du if Du is not None else Dq       # armK: pick the hypothesis on the UNclipped co-adds
+                     for k_ in range(K):
+-                        v_ += Dq[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
++                        v_ += Dg_[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
+                     m_, a_ = v_.max(0)
+                     bt_ = m_ > bv_
+                     bv_ = torch.where(bt_, m_, bv_); bi_ = torch.where(bt_, a_ + h0, bi_)
+                 hh = bi_.cpu().numpy()
++                if Du is not None and K >= 3:
++                    try:
++                        ofh_ = OFF_t[bi_]                                  # (n, K) offsets of each peak's best hyp
++                        vk_ = torch.stack([Du[k_][ofh_[:, k_] + pf_].float() for k_ in range(K)], 1)
++                        rs_ = (vk_.sum(1) - vk_.max(1).values) * (K / (K - 1.0)) * norm
++                        o2_ = torch.argsort(-rs_)[:NPK]
++                        yy, xx, sc = yy[o2_], xx[o2_], rs_[o2_]
++                        hh = hh[o2_.cpu().numpy()]
++                        del vk_, rs_, ofh_
++                    except Exception as ex:
++                        log("fstk rloo failed:", repr(ex)[:120])
++                        if len(sc) > NPK:
++                            yy, xx, sc = yy[:NPK], xx[:NPK], sc[:NPK]; hh = hh[:NPK]
+                 del OFF_t
++            if len(sc) > NPK:     # (no rescore / K < 3 / failed): plain top NPK
++                t2_ = torch.topk(sc, NPK).indices
++                yy, xx, sc = yy[t2_], xx[t2_], sc[t2_]; hh = hh[t2_.cpu().numpy()]
+             yy, xx, sc = yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()
+             fi = fi0 + len(frames_out)
+             for j in range(len(sc)):
+@@ -260,25 +321,35 @@
+                             vx_ = (round(pvx / dv) + ddx) * dv; vy_ = (round(pvy / dv) + ddy) * dv
+                             for ey in (-1, 0, 1):
+                                 for ex in (-1, 0, 1):
+-                                    a_ = 0.0
++                                    a_ = 0.0; ix_ = []
+                                     for k_ in range(K):
+                                         sxx = int(round(vx_ * dts_c[k_])); syy = int(round(vy_ * dts_c[k_]))
+-                                        a_ += float(Dq[k_, (P + syy + yi + ey) * WD + P + sxx + xi + ex])
+-                                    bestv = max(bestv, a_ * qn)
++                                        ix_.append((P + syy + yi + ey) * WD + P + sxx + xi + ex)
++                                        a_ += float(Dq[k_, ix_[-1]])
++                                    if a_ * qn > bestv:
++                                        bestv = a_ * qn; bix_ = ix_
++                    rl_ = float('nan')
++                    if Du is not None:
++                        vv_ = [float(Du[k_, bix_[k_]]) for k_ in range(K)]
++                        rl_ = (sum(vv_) - max(vv_)) * K / (K - 1.0) * norm
+                     bl = float(bs[yi - 2:yi + 3, xi - 2:xi + 3].max())
+                     rk = int((sc > bl).sum()) if len(sc) else 0
++                    if Du is not None and len(sc):
++                        rk = int((sc > rl_).sum())
+                     inprior = (VLO * vcs <= math.hypot(pvx, pvy) <= VHI * vcs) and \
+                         abs(math.atan2(pvx * vcy - pvy * vcx, pvx * vcx + pvy * vcy)) <= ANG
+                     pstat.append((pr.get("tag", "?"), d, bestv, bl, rk))
+                     log(f"fstk probe {pr.get('tag', '?')}: d={d:.2f} (r {rp:.2f}), |v|/vc {math.hypot(pvx, pvy) / vcs:.3f}, "
+-                        f"in prior {inprior}, exact-hyp local max {bestv:.2f}, best-map 5x5 max {bl:.2f}, "
++                        f"in prior {inprior}, exact-hyp local max {bestv:.2f} rloo {rl_:.2f}, best-map 5x5 max {bl:.2f}, "
+                         f"rank among kept peaks {rk}, map max {float(sc.max()) if len(sc) else 0:.2f}")
+                 except Exception as ex:
+                     log("fstk probe failed:", repr(ex)[:120])
+             log(f"fstk d={d:.2f}: {nh}/{nprior} hyps in {dtc:.1f}s ({nh / max(dtc, 1e-6):.0f} hyp/s, K {K}, "
+                 f"{'int8 q%.2f' % qs if use8 else 'fp16'}), warp {t_warp:.1f}s, max {float(sc.max()) if len(sc) else 0:.2f}, "
+-                f"peaks>5/6/7 {nab}, kept {len(sc)}")
++                f"peaks>5/6/7 {nab}, kept {len(sc)}, clipped-map max {cstat_[0]:.2f} NPK-th {cstat_[1]:.2f}, "
++                f"kept min {float(sc.min()) if len(sc) else 0:.2f}")
+             del Dq, bs, pk
++            Du = None
+             Dm = None
+         except Exception as ex:
+             log(f"fstk failed at d={d:.1f}:", repr(ex)[:300])

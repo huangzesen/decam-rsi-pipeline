@@ -1,0 +1,89 @@
+diff -ru -x __pycache__ -x dump -x ana -x out.json -x out.json.tmp -x run.log -x pid -x arm.diff $RSI_SANDBOX/r1/gen090/workspace/submission/stackd/finder.py $RSI_SANDBOX/r1/gen090/tmp/armA/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen090/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ $RSI_SANDBOX/r1/gen090/tmp/armA/stackd/finder.py	2026-11-05 11:59:06
+@@ -1256,10 +1256,30 @@
+     v0, c0 = score_states(states)
+     write_out(a.out, to_cands(states, total(v0, c0), nights_good(v0, c0)))
+     log(f"wrote {len(states)} seed states (pre-refinement)")
++    ADUMP = os.environ.get("TNO_ARMA_DUMP")   # gen 90 armA diagnostics: dir of stage dumps (no effect on output)
++    if ADUMP:
++        try:
++            os.makedirs(ADUMP, exist_ok=True)
++            np.savez(os.path.join(ADUMP, "seeds.npz"), states=states, skind=skind, seed_sc=seed_sc, t=t, obs=obs,
++                     night=night, t_ep=t_ep, tot0=total(v0, c0), ng0=nights_good(v0, c0), n30=night3(v0, c0))
++        except Exception as ex:
++            log("armA dump seeds failed:", repr(ex)[:200])
++    # gen 90 armA (TNO_ARMA_KEEP, 0 = gen085): CEM maximises the all-exposure stack, which can trade a faint body's
++    # weakest nights for brighter noise/neighbours (its 3rd-best night stack n3 drops).  When the seed itself has >= 3
++    # good nights and a higher n3 than its refined state, the seed state is ALSO kept as a refined track (zero extra
++    # map lookups: v0/c0 are already scored); dedup / the p null decide between them.
++    AKEEP = os.environ.get("TNO_ARMA_KEEP", "0") != "0"
++    akeep_n = [0]
++    try:
++        ng0_ = nights_good(v0, c0); n30_ = night3(v0, c0); tot0_ = total(v0, c0)
++    except Exception as ex:
++        AKEEP = False
++        log("armA keep setup failed:", repr(ex)[:200])
+ 
+     rng = np.random.default_rng(1)
+     K = 384 if cuda else 192
+     refined, rsc, rng_, rkd, rn3 = [], [], [], [], []
++    rsj = []
+     rsrc2 = []
+     order_ = np.argsort(-seed_sc)
+     # gen 34: cross-validated rerank (see NOTES.md) needs time after refinement
+@@ -1519,13 +1539,36 @@
+         refined.append(bestS); rsc.append(total(v, c)[0]); rng_.append(nights_good(v, c)[0]); rkd.append(skind[j])
+         rsrc2.append(SRC2[0][0] <= j < SRC2[0][1])
+         rn3.append(float(night3(v, c)[0]))
++        rsj.append(j)
++        if AKEEP:
++            try:
++                if ng0_[j] >= 3 and n30_[j] > rn3[-1] and skind[j] != 2:
++                    refined.append(states[j].copy()); rsc.append(float(tot0_[j])); rng_.append(int(ng0_[j]))
++                    rkd.append(skind[j]); rsrc2.append(rsrc2[-1]); rn3.append(float(n30_[j])); rsj.append(-1 - j)
++                    akeep_n[0] += 1
++            except Exception as ex:
++                AKEEP = False
++                log("armA keep failed:", repr(ex)[:200])
+         if (jj % 50) == 49:
+             R = np.array(refined)
+             write_out(a.out, dedup(to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3)), score_states, t_ep))
+     if refined:
+         R = np.array(refined)
+         cands = to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3), boost=False)
++        if AKEEP:
++            log(f"armA keep: {akeep_n[0]} pre-refinement seed states kept alongside their refined tracks")
++        if ADUMP:
++            try:
++                np.savez(os.path.join(ADUMP, "refined.npz"), R=R, rsc=np.array(rsc), rng=np.array(rng_), rkd=np.array(rkd),
++                         rn3=np.array(rn3), rsj=np.array(rsj), nseeds=len(states))
++                write_out(os.path.join(ADUMP, "prededup.json"), cands)
++                with open(os.path.join(ADUMP, "prededup_all.json"), "w") as f_:
++                    json.dump({"candidates": cands}, f_)
++            except Exception as ex:
++                log("armA dump refined failed:", repr(ex)[:200])
+         cands = dedup(cands, score_states, t_ep)
++        if ADUMP:
++            write_out(os.path.join(ADUMP, "dedup.json"), cands)
+ 
+         def n3boost(cs):   # gen 79: apply the n3 p path after any p reassignment (cv_rerank hands out sorted p values)
+             return [dict(c_, p=max(c_["p"], c_["pn"]), p0=c_["p"]) if "pn" in c_ else c_ for c_ in cs]
+@@ -1536,6 +1579,8 @@
+             try:
+                 cands = cv_rerank(cands, R, np.array(rkd), np.array(rsc), cem, score_states, total, t, night, nights_u, budget, T0, log, zout=CVZ)
+                 write_out(a.out, n3boost(cands))
++                if ADUMP:
++                    write_out(os.path.join(ADUMP, "cv.json"), n3boost(cands))
+             except Exception as ex:
+                 import traceback
+                 traceback.print_exc()
+@@ -1554,6 +1599,8 @@
+             try:
+                 cands = rankx(cands, R, np.array(rkd), np.array(rsc), score_states, wf, nights_idx, CVZ, log, dump=rx_dump)
+                 write_out(a.out, n3boost(cands))
++                if ADUMP:
++                    write_out(os.path.join(ADUMP, "rankx.json"), n3boost(cands))
+             except Exception as ex:
+                 import traceback
+                 traceback.print_exc()

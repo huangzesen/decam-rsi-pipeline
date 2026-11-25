@@ -1,0 +1,127 @@
+--- $RSI_SANDBOX/r1/gen096/workspace/submission/stackd/finder.py	2026-11-05 14:24:52
++++ $RSI_SANDBOX/r1/gen096/tmp/arm_shape/submission/stackd/finder.py	2026-11-05 18:13:30
+@@ -1819,6 +1819,84 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 96 arm (TNO_NS_SHAPE): PSF-shape night-peak ranking.  When the cap binds, each candidate's 7x7 S/N stamp is fit
++    # with a unit-peak Gaussian (sigma from the median normalised profile of bright non-ceiling peaks of this map);
++    # the residual chi2 is converted to a robust z against an empirical null (synthetic Gaussians with random sub-pixel
++    # offsets, amplitude 3.7-5, added to stamps at random map positions), and peaks are ranked by
++    # z - SHB * max(0, chi2z - 1).  Any failure falls back to plain z ranking.
++    SHAPE = os.environ.get("TNO_NS_SHAPE", "1") != "0"
++    SHB = float(os.environ.get("TNO_NS_SHB", "0.5"))
++    SHR = int(os.environ.get("TNO_NS_SHR", "3"))
++    sh_log = []
++    def shape_rank(z, yy_, xx_, sc_, zc_=None):
++        """adjusted ranking score for the peaks (yy_, xx_) of map z; returns sc_ on any failure"""
++        if not SHAPE or sc_.numel() == 0 or time.time() - T0 > deadline:
++            return sc_
++        try:
++            R_ = SHR; K_ = 2 * R_ + 1
++            zf = z.float()
++            off = torch.arange(-R_, R_ + 1, device=zf.device)
++            dyo = off[:, None].expand(K_, K_).reshape(-1); dxo = off[None, :].expand(K_, K_).reshape(-1)
++            def stamps(y_, x_):
++                Y = y_[:, None].long() + dyo[None]; X = x_[:, None].long() + dxo[None]
++                inb = (Y >= 0) & (Y < H) & (X >= 0) & (X < W)
++                v = zf[Y.clamp(0, H - 1), X.clamp(0, W - 1)]
++                ok = inb & (v != 0)
++                return torch.where(ok, v, torch.zeros_like(v)), ok.float()
++            Sv, Sm = stamps(yy_, xx_)
++            ci = (K_ * K_) // 2
++            # empirical profile from bright, non-ceiling peaks
++            zhi = (0.9 * zc_) if zc_ is not None else 1e9
++            br = (sc_ >= 6.0) & (sc_ < zhi) & (Sm.sum(1) >= K_ * K_)
++            nb = int(br.sum())
++            r2 = (dyo.float() ** 2 + dxo.float() ** 2)
++            sig = 0.8
++            if nb >= 30:
++                ib = torch.nonzero(br, as_tuple=True)[0]
++                if ib.numel() > 3000:
++                    ib = ib[torch.topk(sc_[ib], 3000).indices]
++                prof = (Sv[ib] / Sv[ib, ci:ci + 1]).cpu().median(0).values.to(zf.device)
++                best = None
++                for s_ in np.arange(0.4, 2.01, 0.05):
++                    g_ = torch.exp(-0.5 * r2 / float(s_) ** 2)
++                    e_ = float(((prof - g_) ** 2).sum())
++                    if best is None or e_ < best[0]:
++                        best = (e_, float(s_))
++                sig = min(1.5, max(0.5, best[1]))
++            T_ = torch.exp(-0.5 * r2 / sig ** 2)
++            def chi2(Sv_, Sm_):
++                TT = (Sm_ * T_[None] ** 2).sum(1).clamp(min=1e-6)
++                A = (Sm_ * Sv_ * T_[None]).sum(1) / TT
++                res = (Sv_ - A[:, None] * T_[None]) * Sm_
++                return (res ** 2).sum(1) * (K_ * K_) / Sm_.sum(1).clamp(min=1.0)
++            # empirical null
++            rng_ = np.random.default_rng(1234 + int(sc_.numel()))
++            NN = 1024
++            ry = torch.from_numpy(rng_.integers(R_, max(R_ + 1, H - R_), NN)).to(zf.device)
++            rx = torch.from_numpy(rng_.integers(R_, max(R_ + 1, W - R_), NN)).to(zf.device)
++            Nv, Nm = stamps(ry, rx)
++            gd = Nm.sum(1) >= K_ * K_
++            Nv, Nm = Nv[gd], Nm[gd]
++            if Nv.shape[0] < 100:
++                return sc_
++            n_ = Nv.shape[0]
++            oy = torch.from_numpy(rng_.uniform(-0.5, 0.5, n_).astype(np.float32)).to(zf.device)
++            ox = torch.from_numpy(rng_.uniform(-0.5, 0.5, n_).astype(np.float32)).to(zf.device)
++            am = torch.from_numpy(rng_.uniform(3.7, 5.0, n_).astype(np.float32)).to(zf.device)
++            Gs = am[:, None] * torch.exp(-0.5 * ((dyo.float()[None] - oy[:, None]) ** 2 +
++                                                 (dxo.float()[None] - ox[:, None]) ** 2) / sig ** 2)
++            cn = chi2(Nv + Gs, Nm).cpu()
++            med = float(cn.median()); mad = float((cn - med).abs().median()) * 1.4826
++            mad = max(mad, 1e-3)
++            cz = (chi2(Sv, Sm) - med) / mad
++            adj = sc_.float() - SHB * torch.clamp(cz - 1.0, min=0.0)
++            adj = torch.where(torch.isfinite(adj), adj, sc_.float())
++            sh_log.append([round(sig, 2), round(med, 1), round(mad, 1), nb,
++                           round(float((cz > 1).float().mean()), 2)])
++            return adj
++        except Exception as ex_:
++            log_(f"night seeds: shape rank failed {repr(ex_)[:200]}")
++            return sc_
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1872,7 +1950,15 @@
+                     inc_ = torch.nonzero(~isc, as_tuple=True)[0]
+                     nf_ = CAP - int(ic_.numel())
+                     if inc_.numel() > nf_:
+-                        inc_ = inc_[torch.topk(sc[inc_], nf_).indices]
++                        si_ = sc[inc_]
++                        rs_ = shape_rank(z, yy[inc_], xx[inc_], si_, zc_)
++                        if rs_ is not si_ and SHAPE:
++                            t0_ = torch.topk(si_, nf_).indices; t1_ = torch.topk(rs_, nf_).indices
++                            m0_ = torch.zeros(int(inc_.numel()), dtype=torch.bool, device=inc_.device); m0_[t0_] = True
++                            sh_log[-1].append(int((~m0_[t1_]).sum()))
++                            inc_ = inc_[t1_]
++                        else:
++                            inc_ = inc_[torch.topk(sc[inc_], nf_).indices]
+                     top = torch.cat([ic_, inc_])
+                     ceil_log.append((nc0_, int(ic_.numel()), int(inc_.numel()),
+                                      round(float(sc[inc_].min()), 2) if inc_.numel() else None))
+@@ -1895,7 +1981,12 @@
+                         keep[rest[np.argsort(-sn[rest])[:nf]]] = True
+                     top = torch.from_numpy(np.flatnonzero(keep)).to(yy.device)
+                 else:
+-                    top = torch.topk(sc, CAP).indices
++                    rs_ = shape_rank(z, yy, xx, sc)
++                    top = torch.topk(rs_, CAP).indices
++                    if rs_ is not sc and SHAPE:
++                        m0_ = torch.zeros(int(sc.numel()), dtype=torch.bool, device=sc.device)
++                        m0_[torch.topk(sc, CAP).indices] = True
++                        sh_log[-1].append(int((~m0_[top]).sum()))
+                 yy, xx, sc = yy[top], xx[top], sc[top]
+             GI[-1].append(nm_i)
+             NMs[nm_i] = F.max_pool2d(z[None, None], 3, 1, 1)[0, 0].reshape(-1).half(); nm_i += 1
+@@ -1911,6 +2002,8 @@
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own
++    if sh_log:
++        log_(f"night seeds: shape rank (sigma, null_med, null_mad, n_bright, frac_cz>1, n_changed) per map {sh_log}")
+     if ceil_log:
+         log_(f"night seeds: ceiling thinning (n_ceil, kept_ceil, kept_sub, min_sub_z) per map {ceil_log}")
+     # sky unit vectors of night peaks

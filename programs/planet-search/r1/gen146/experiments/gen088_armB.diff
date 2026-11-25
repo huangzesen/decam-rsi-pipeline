@@ -1,0 +1,119 @@
+Binary files $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/__pycache__/fastfits.cpython-312.pyc and ./stackd/__pycache__/fastfits.cpython-312.pyc differ
+Binary files $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/__pycache__/orbit.cpython-312.pyc and ./stackd/__pycache__/orbit.cpython-312.pyc differ
+diff -ru $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/finder.py ./stackd/finder.py
+--- $RSI_SANDBOX/r1/gen088/workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ ./stackd/finder.py	2026-11-05 09:32:05
+@@ -1798,6 +1798,83 @@
+         except Exception as ex_:
+             log_(f"night seeds: static veto disabled {repr(ex_)[:200]}")
+             st_cnt = None; st_own = []
++    # gen 88 (TNO_NS_TDIFF, default on; 0 = gen085): temporal difference imaging of the night co-adds.  With >= TDN
++    # nights, the per-pixel median T and robust scatter S (1.4826 MAD) over the UNSHIFTED night co-adds are free of
++    # movers (a TNO moves > 30 px/day, so it sits on any pixel on at most one night).  Each (shifted) night co-add z
++    # used for peaks and the forced read-out becomes (z - a_k T) / clip(S / median(S), 1, TDC), with T and the
++    # divisor shifted like the night's frames and a_k a per-night static depth scale fitted on bright T pixels.
++    TDIF = os.environ.get("TNO_NS_TDIFF", "1") != "0"
++    TDN = int(os.environ.get("TNO_NS_TDN", "5")); TDC = float(os.environ.get("TNO_NS_TDC", "4"))
++    TDMX = int(os.environ.get("TNO_NS_TDMX", "15"))
++    TDK = float(os.environ.get("TNO_NS_TDK", "1.5")); TDQ = float(os.environ.get("TNO_NS_TDQ", "1.2"))
++    td_T = td_D = None; td_a = None
++    if TDIF and len(nu) >= TDN:
++        try:
++            ttd0 = time.time()
++            ksel = np.arange(len(nu))
++            if len(ksel) > TDMX:
++                ksel = np.unique(np.round(np.linspace(0, len(nu) - 1, TDMX)).astype(int))
++            if len(ksel) * H * W * 4 > 3.0e9:
++                raise RuntimeError(f"memory guard {len(ksel)} x {H} x {W}")
++            stk = torch.empty((len(ksel), H, W), dtype=torch.float32)
++            for j_, k_ in enumerate(ksel):
++                idx = nidx[k_]
++                acc = torch.zeros((H, W), dtype=torch.float32, device=dev)
++                cw = torch.zeros((H, W), dtype=torch.float32, device=dev)
++                for n in idx:
++                    acc += maps[n].float() * float(wf[n]); cw += cov[n].float() * float(wf[n] ** 2)
++                z_ = torch.where(cw > 0, acc / torch.sqrt(torch.clamp(cw, min=1e-3)),
++                                 torch.full_like(acc, float("nan")))
++                stk[j_] = z_.cpu()
++                del acc, cw, z_
++                if time.time() - T0 > deadline:
++                    raise RuntimeError("deadline")
++            Tm = torch.empty((H, W), dtype=torch.float32); Sm = torch.empty((H, W), dtype=torch.float32)
++            RC = max(1, int(2e7 // max(1, len(ksel) * W)))
++            for r0 in range(0, H, RC):
++                blk = stk[:, r0:r0 + RC]
++                med = torch.nanmedian(blk, dim=0).values
++                mad = torch.nanmedian((blk - med[None]).abs(), dim=0).values
++                Tm[r0:r0 + RC] = med; Sm[r0:r0 + RC] = 1.4826 * mad
++                if time.time() - T0 > deadline:
++                    raise RuntimeError("deadline")
++            nv_ = torch.isfinite(stk).sum(0)
++            okp = (nv_ >= 3) & torch.isfinite(Tm) & torch.isfinite(Sm)
++            Tm = torch.where(okp, Tm, torch.zeros_like(Tm))
++            smed = float(Sm[okp].median()) if bool(okp.any()) else 1.0
++            smed = max(smed, 1e-3)
++            # divisor from a 5x5-smoothed S (per-pixel MAD over ~8 nights is itself noisy, so a raw S/S_med would
++            # down-weight half of all clean pixels); T soft-thresholded at TDK x its own noise (1.2533 S_med/sqrt(n))
++            # so clean sky is not made noisier by subtracting a noisy template.
++            Ssm = F.avg_pool2d(torch.where(okp, Sm, torch.full_like(Sm, smed))[None, None], 5, 1, 2,
++                               count_include_pad=False)[0, 0]
++            ssm = max(float(Ssm[okp].median()) if bool(okp.any()) else smed, 1e-3)
++            Dm = torch.where(okp, torch.clamp(Ssm / (TDQ * ssm), 1.0, TDC), torch.ones_like(Sm))
++            thr_ = TDK * 1.2533 * smed / math.sqrt(len(ksel))
++            Tm = torch.sign(Tm) * torch.clamp(Tm.abs() - thr_, min=0.0)
++            del Ssm
++            # per-night static depth scale a_k: least squares of night co-add on T over bright static pixels
++            td_a = np.ones(len(nu))
++            br = okp & (Tm >= 3.0)
++            nbr = int(br.sum())
++            if nbr >= 100:
++                for j_, k_ in enumerate(ksel):
++                    zk = stk[j_]; m_ = br & torch.isfinite(zk)
++                    if int(m_.sum()) >= 100:
++                        td_a[k_] = float((zk[m_] * Tm[m_]).sum() / torch.clamp((Tm[m_] ** 2).sum(), min=1e-6))
++                for k_ in range(len(nu)):
++                    if k_ not in set(ksel.tolist()):
++                        td_a[k_] = float(np.median(td_a[ksel]))
++                td_a = np.clip(td_a, 0.5, 2.0)
++            del stk, Sm, nv_
++            td_T = Tm.to(dev); td_D = Dm.to(dev)
++            del Tm, Dm
++            log_(f"night seeds: TDIFF template from {len(ksel)} nights, S_med {smed:.3f}, T thr {thr_:.2f}, "
++                 f"divisor>1 frac {float((td_D > 1.0).float().mean()):.3f}, at cap {float((td_D >= TDC).float().mean()):.3f}, "
++                 f"bright px {nbr}, a_k {np.round(td_a, 2).tolist()}, {time.time() - ttd0:.1f}s")
++        except Exception as ex_:
++            log_(f"night seeds: TDIFF disabled {repr(ex_)[:200]}")
++            td_T = td_D = None
+     tN, oN, PK, ZK, GC, GI = [], [], [], [], [], []
+     NMs = torch.empty((int(Gk.sum()), H * W), dtype=torch.float16, device=dev); nm_i = 0
+     for k_, u in enumerate(nu):
+@@ -1818,6 +1895,21 @@
+                 acc += shifted(maps[n].float(), dx_, dy_) * float(wf[n])
+                 cw += shifted(cov[n].float(), dx_, dy_) * float(wf[n] ** 2)
+             z = torch.where(cw > 0, acc / torch.sqrt(torch.clamp(cw, min=1e-3)), torch.zeros_like(acc))
++            if td_T is not None:
++                try:
++                    wsum_ = float(sum(float(wf[n]) for n in idx)) or 1.0
++                    Ts_ = torch.zeros((H, W), dtype=torch.float32, device=dev)
++                    Ds_ = torch.zeros((H, W), dtype=torch.float32, device=dev)
++                    for jn, n in enumerate(idx):
++                        dx_, dy_ = int(round(float(sx[jn]))), int(round(float(sy[jn])))
++                        w_ = float(wf[n]) / wsum_
++                        Ts_ += shifted(td_T, dx_, dy_) * w_
++                        Ds_ += shifted(td_D, dx_, dy_) * w_
++                    z = torch.where(cw > 0, (z - float(td_a[k_]) * Ts_) / torch.clamp(Ds_, min=1.0), z)
++                    del Ts_, Ds_
++                except Exception as ex_:
++                    log_(f"night seeds: TDIFF apply failed {repr(ex_)[:200]}")
++                    td_T = td_D = None
+             del acc, cw
+             mp = F.max_pool2d(z[None, None], 5, 1, 2)[0, 0]
+             pk = (z == mp) & (z >= NZ)
+@@ -1890,6 +1982,7 @@
+     if st_log:
+         log_(f"night seeds: static veto (peaks, vetoed) per map {st_log}")
+     del st_cnt, st_own
++    td_T = td_D = None
+     if ceil_log:
+         log_(f"night seeds: ceiling thinning (n_ceil, kept_ceil, kept_sub, min_sub_z) per map {ceil_log}")
+     # sky unit vectors of night peaks

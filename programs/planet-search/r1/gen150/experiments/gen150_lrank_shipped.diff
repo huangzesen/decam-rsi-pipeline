@@ -1,0 +1,71 @@
+--- history/gen148/submission/stackd/finder.py	2026-11-09 05:41:14
++++ submission/stackd/finder.py	2026-11-09 09:20:39
+@@ -1576,7 +1576,7 @@
+     except Exception:
+         RCLIP = 0.0
+ 
+-    def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None):
++    def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None, zl=None):
+         out = []
+         ref_ = sc
+         try:
+@@ -1610,6 +1610,34 @@
+         except Exception as ex:
+             log("rclip failed:", repr(ex)[:200])
+             zc_ = None
++        # gen 150 (TNO_LRANK): the learned key zl re-assigns the SAME multiset of z values (quantile map): the track
++        # with the k-th best zl gets the k-th best z.  The scenario's p distribution is unchanged (global top-25N cut
++        # calibration kept); only which tracks hold the high z (membership of the 200 cap) changes.
++        try:
++            if zl is not None and len(zl) == len(S) == len(z_):
++                zl = np.asarray(zl, float)
++                if np.all(np.isfinite(zl)):
++                    # the PROT best tracks by the old z keep their z (bright bodies outside the training range)
++                    zf_ = np.where(np.isfinite(z_), z_, -1e9)
++                    PROT_ = int(os.environ.get("TNO_LRANK_PROT", "50"))
++                    # only rows the emission loop below keeps take part (gate, finite, r >= 25 au, bound)
++                    el_ = np.zeros(len(S), bool)
++                    for j in range(len(S)):
++                        if nn_[j] >= 3 and np.all(np.isfinite(S[j])):
++                            r_ = np.linalg.norm(S[j, :3])
++                            el_[j] = r_ >= 25 and 0.5 * (S[j, 3:] @ S[j, 3:]) - GM / r_ < 0
++                    ie_ = np.flatnonzero(el_)
++                    ob_ = ie_[np.argsort(-zf_[ie_], kind="stable")]
++                    rest_ = np.sort(ob_[PROT_:])
++                    znew_ = zf_.copy()
++                    if len(rest_):
++                        zs_ = np.sort(zf_[rest_])[::-1]
++                        znew_[rest_[np.argsort(-zl[rest_], kind="stable")]] = zs_
++                    nmv_ = int((np.argsort(-znew_, kind="stable")[:200, None] != np.argsort(-z_, kind="stable")[None, :200]).all(1).sum())
++                    log(f"lrank: z re-assigned by learned key; {nmv_} of the top 200 by z are new")
++                    z_ = znew_
++        except Exception as ex:
++            log("lrank map failed:", repr(ex)[:200])
+         n3n = None
+         try:
+             if N3 > 0 and n3 is not None and kd is not None and len(n3) == len(S) and int((kd == 2).sum()) >= 30:
+@@ -2081,8 +2109,23 @@
+             log("refined dump failed:", repr(ex)[:200])
+     if refined:
+         R = np.array(refined)
++        zl_ = None
++        if os.environ.get("TNO_LRANK", "1") != "0" and len(R) >= 50:
++            try:
++                t_l = time.time()
++                import rankfeat
++                vL_, cL_ = [], []
++                for i0 in range(0, len(R), 4096):
++                    a_, b_ = score_states(np.asarray(R[i0:i0 + 4096], float)); vL_.append(a_.astype(np.float32)); cL_.append(b_)
++                XL_ = rankfeat.features(np.concatenate(vL_), np.concatenate(cL_), wf, nights_idx, np.array(rkd))
++                zl_ = rankfeat.key(XL_, os.environ.get("TNO_LRANK_MODE", "lin"))
++                if len(zl_) != len(R) or not np.all(np.isfinite(zl_)):
++                    zl_ = None
++                log(f"lrank: {len(R)} refined tracks scored by the learned ranker in {time.time() - t_l:.1f}s")
++            except Exception as ex:
++                log("lrank failed:", repr(ex)[:200]); zl_ = None
+         cands = to_cands(R, np.array(rsc), np.array(rng_), np.array(rkd), n3=np.array(rn3), boost=False,
+-                         scq=np.array(rscq) if RCLIP > 0 else None)
++                         scq=np.array(rscq) if RCLIP > 0 else None, zl=zl_)
+         sdump_("tocands", cands)
+ 
+         def rbg_cap(cs):   # gen 124 (TNO_RBGCAP): ring background decides which rows make the 200 cap (membership only)

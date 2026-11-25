@@ -1,0 +1,473 @@
+<meta name="dash-one-writer">
+<style>
+.dm { display: grid; gap: var(--cds-gap-xl); font-family: var(--font-anthropic-sans); color: var(--color-fg); }
+.dm h1 { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; }
+.dm h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0 0 var(--cds-gap-sm); }
+.dm .lede { margin: var(--cds-gap-sm) 0 0; color: var(--color-fg-muted); max-width: 72ch; }
+.dm .lede b { color: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+.dm .tabs { display: flex; flex-wrap: wrap; gap: var(--cds-gap-xs); border-bottom: 1px solid var(--color-border-line); }
+.dm .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; font: inherit; color: var(--color-fg-muted); cursor: pointer; }
+.dm .tab[aria-selected="true"] { color: var(--color-fg); border-bottom-color: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+.dm .pane { display: grid; gap: var(--cds-gap-xl); }
+.dm .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--cds-gap-md); }
+.dm .tile { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-md) var(--cds-pad-lg); }
+.dm .tile .k { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.dm .tile .v { font-family: var(--font-anthropic-serif); font-size: 1.9rem; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.dm .tile .s { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+.dm .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--cds-gap-lg); }
+.dm .card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); min-width: 0; }
+.dm .chart { position: relative; min-height: 190px; }
+.dm .map { position: relative; min-height: 260px; }
+.dm .chart svg, .dm .map svg { display: block; width: 100%; height: auto; }
+.dm .chart text, .dm .map text { fill: var(--cds-text-secondary); font-size: var(--cds-font-size-caption); }
+.dm .tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); box-shadow: var(--cds-shadow-popover); border-radius: var(--cds-radius); padding: 4px 8px; font-size: var(--cds-font-size-caption); max-width: 320px; white-space: normal; z-index: 2; }
+.dm .sub { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: 0 0 var(--cds-gap-sm); }
+.dm .legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); margin: 0 0 var(--cds-gap-sm); padding: 0; list-style: none; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.dm .legend li { display: flex; align-items: center; gap: 6px; }
+.dm .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--cds-chart-muted); }
+.dm .sw.ring { background: none; border: 2px solid var(--cds-chart-muted); }
+.dm .sw.line { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed var(--cds-chart-reference); background: none; }
+.dm .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--cds-gap-md); margin: 0 0 var(--cds-gap-sm); }
+.dm .tw { overflow-x: auto; }
+.dm table { border-collapse: collapse; width: 100%; font-size: var(--cds-font-size-body); font-variant-numeric: tabular-nums; }
+.dm th, .dm td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--color-border-line); white-space: nowrap; vertical-align: top; }
+.dm th { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); font-weight: var(--cds-font-weight-medium); }
+.dm td.num, .dm th.num { text-align: right; }
+.dm td.wrap { white-space: normal; min-width: 220px; }
+.dm .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: var(--cds-font-size-caption); border: 1px solid currentColor; }
+.dm .st-ok { color: var(--color-ok); } .dm .st-warn { color: var(--color-warn); } .dm .st-bad { color: var(--color-bad); } .dm .st-mute { color: var(--color-fg-muted); }
+.dm details { color: var(--color-fg-muted); font-size: var(--cds-font-size-body); }
+.dm details p, .dm details li { max-width: 80ch; }
+.dm code { font-size: 0.92em; }
+</style>
+
+<div class="dm">
+  <header id="top">
+    <h1>DECam data</h1>
+    <p class="lede">Downloads, Globus copies, the 5 % searches and the map of the whole archive, in one place. Filling NERSC's gaps in the public DECam archive: <b data-draw="lede-speed" data-source="summary" data-field="mbs" data-row="0">—</b> MB/s from NOIRLab, <b data-draw="lede-globus" data-source="summary" data-field="globus_mbs" data-row="0">—</b> MB/s copied on to Vista,<b data-draw="lede-fetched" data-source="summary" data-field="fetched_tb" data-row="0">—</b> of <b data-draw="lede-blank" data-source="summary" data-field="blank_tb" data-row="0">—</b> TB fetched, NERSC scratch at <b data-draw="lede-scratch" data-source="summary" data-field="nersc_tib" data-row="0">—</b> of 20 TiB. Status as of <b data-draw="lede-asof" data-source="summary" data-field="asof" data-row="0">—</b> (Pacific).</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" data-tab="movement" aria-selected="true">Download and transfer</button>
+    <button class="tab" role="tab" data-tab="searches" aria-selected="false">5 % searches</button>
+    <button class="tab" role="tab" data-tab="atlas" aria-selected="false">Archive map</button>
+    <button class="tab" role="tab" data-tab="log" aria-selected="false">Log and notes</button>
+  </nav>
+
+  <section id="movement" class="pane">
+    <div id="tiles" class="tiles">
+      <div class="tile"><div class="k">Download speed now</div><div class="v"><span data-draw="t-mbs" data-source="summary" data-field="mbs" data-row="0">—</span></div><div class="s">MB/s, all parts · <span data-draw="t-parts">—</span></div></div>
+      <div class="tile"><div class="k">Globus to Vista now</div><div class="v"><span data-draw="t-gl" data-source="summary" data-field="globus_mbs" data-row="0">—</span></div><div class="s">MB/s, all copies · <span data-draw="t-gltb" data-source="summary" data-field="globus_tb" data-row="0">—</span> TB moved since 11-17</div></div>
+      <div class="tile"><div class="k">Fetched from NOIRLab</div><div class="v"><span data-draw="t-fetched" data-source="summary" data-field="fetched_tb" data-row="0">—</span></div><div class="s">TB of <span data-draw="t-blank" data-source="summary" data-field="blank_tb" data-row="0">—</span> TB · <span data-draw="t-pct" data-source="summary" data-field="fetched_pct" data-row="0">—</span>%</div></div>
+      <div class="tile"><div class="k">Third 5 % gaps</div><div class="v"><span data-draw="t-a15" data-source="summary" data-field="a15_done" data-row="0">—</span></div><div class="s">of <span data-draw="t-a15t" data-source="summary" data-field="a15_total" data-row="0">—</span> files, kept at NERSC</div></div>
+      <div class="tile"><div class="k">Fill relayed to Vista</div><div class="v"><span data-draw="t-vista" data-source="summary" data-field="on_vista_tb" data-row="0">—</span></div><div class="s">TB, copies verified</div></div>
+      <div class="tile"><div class="k">Released at NERSC</div><div class="v"><span data-draw="t-rel" data-source="summary" data-field="released_tb" data-row="0">—</span></div><div class="s">TB of old images, after their Vista copy</div></div>
+      <div class="tile"><div class="k">NERSC scratch</div><div class="v"><span data-draw="t-nersc" data-source="summary" data-field="nersc_tib" data-row="0">—</span></div><div class="s">TiB of 20 · downloads pause at 18.5</div></div>
+      <div class="tile"><div class="k">Vista scratch</div><div class="v"><span data-draw="t-vscr" data-source="summary" data-field="vista_scratch_tb" data-row="0">—</span></div><div class="s">TB · no quota, files unread for 10 days are purged</div></div>
+      <div class="tile"><div class="k">Time left at this speed</div><div class="v"><span data-draw="t-eta" data-source="summary" data-field="eta_days" data-row="0">—</span></div><div class="s">days for the whole gap</div></div>
+    </div>
+
+    <div id="devices" class="card">
+      <h2>Downloads from NOIRLab, by device</h2>
+      <p class="sub">MB/s of each device's fetch logs, one point every 10 minutes (Pacific). A line at 0 means idle or stopped, a gap means the device could not be reached. Together now: <b data-draw="dev-sum" data-source="dl_total" data-field="mbs" data-row="0">—</b> MB/s, against a goal of <span data-draw="dev-goal">—</span> MB/s for all devices together. Downloads are rotated between devices when one degrades (rule of 2026-11-20).</p>
+      <ul class="legend"><li><span class="sw" data-c="0"></span>NERSC</li><li><span class="sw" data-c="1"></span>Lonestar6</li><li><span class="sw" data-c="2"></span>Vista</li><li><span class="sw" data-c="3"></span>Mac</li><li><span class="sw" data-c="4"></span>All together</li><li><span class="sw line"></span>Goal, all devices together</li></ul>
+      <div class="chart" data-draw="dev-chart" data-source="dl_hist"></div>
+      <div class="tw"><table data-source="dl_now" data-row-key="device">
+        <thead><tr><th data-field="device">Device</th><th data-field="state">State</th><th class="num" data-field="mbs">MB/s</th><th data-field="streams">Streams in use of budget</th><th data-field="cool_until">Cool-down ends</th><th class="num" data-field="files">Files</th><th class="num" data-field="bad_pct">Bad md5 %</th><th class="num" data-field="errors">Errors</th><th data-field="note">Why limited</th></tr></thead>
+        <tbody data-draw="dev-body"></tbody>
+      </table></div>
+      <p class="sub">Files and bad md5 count the last 10 minutes; errors are refused or failed connections. When a device is limited it cools down for 30 minutes (no new file starts) and its stream budget drops by one. As of <span data-draw="dev-asof" data-source="dl_now" data-field="asof" data-row="0">—</span> (Pacific).</p>
+    </div>
+
+    <div id="budgets" class="card">
+      <h2>Stream budgets</h2>
+      <p class="sub">Each device has a budget of download streams, shared by all its copies. Every time NOIRLab limits a device it loses one, until the number settles.</p>
+      <div class="tw"><table data-source="dl_streams" data-row-key="t,device">
+        <thead><tr><th data-field="t">Time (Pacific)</th><th data-field="device">Device</th><th data-field="why">Why</th><th data-field="change">Streams</th><th data-field="until">Cool-down until</th></tr></thead>
+        <tbody data-draw="budget-body"></tbody>
+      </table></div>
+    </div>
+
+    <div id="routes" class="card">
+      <h2>Transfers between devices</h2>
+      <p class="sub">MB/s of copies that ran in each 10 minutes: Mac to NERSC by rsync, the others by Globus (effective rate of tasks that ran or ended in the cycle). A gap means no copy ran.</p>
+      <div class="two">
+        <div>
+          <ul class="legend"><li><span class="sw" data-c="0"></span>Mac to NERSC</li><li><span class="sw" data-c="1"></span>NERSC to Vista</li><li><span class="sw" data-c="2"></span>Lonestar6 to Vista</li><li><span class="sw" data-c="3"></span>Lonestar6 to NERSC</li><li><span class="sw" data-c="4"></span>Vista to NERSC</li></ul>
+          <div class="chart" data-draw="xfer-chart" data-source="dl_hist"></div>
+        </div>
+        <div class="tw"><table data-source="dl_xfer" data-row-key="route">
+          <thead><tr><th data-field="route">Route</th><th data-field="how">By</th><th class="num" data-field="mbs">MB/s now</th><th class="num" data-field="last_mbs">Last seen</th><th data-field="last_at">When</th></tr></thead>
+          <tbody data-draw="xfer-body"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <div id="probes" class="card">
+      <h2>Probe results</h2>
+      <p class="sub">A short test download (60 s, 16 streams, files md5-checked and deleted) from each idle device, run when a device slows down, and by hand.</p>
+      <div class="tw"><table data-source="dl_probes" data-row-key="t,device">
+        <thead><tr><th data-field="t">Time (Pacific)</th><th data-field="device">Device</th><th class="num" data-field="mbs">MB/s</th><th class="num" data-field="files">Files</th><th class="num" data-field="bad">Bad md5</th><th class="num" data-field="errors">Errors</th><th data-field="note">Note</th></tr></thead>
+        <tbody data-draw="probe-body"></tbody>
+      </table></div>
+    </div>
+
+    <div id="trends" class="two">
+      <div class="card"><h2>Download and transfer speed</h2><p class="sub">MB/s, one point per status update: downloads from NOIRLab summed over the parts, and Globus copies from NERSC to Vista (bytes moved since the previous update).</p>
+        <ul class="legend"><li><span class="sw" data-c="0"></span>Download, NOIRLab to NERSC</li><li><span class="sw" data-c="1"></span>Globus, NERSC to Vista</li></ul>
+        <div class="chart" data-draw="speed-chart" data-source="history"></div></div>
+      <div class="card"><h2>NERSC scratch</h2><p class="sub">TiB used of the 20 TiB quota. Downloads start below 17.5 TiB and pause at 18.5.</p><div class="chart" data-draw="scratch-chart" data-source="history"></div></div>
+    </div>
+
+    <div id="holdings" class="card">
+      <h2>Where the DECam data is</h2>
+      <div class="tw"><table data-source="holdings" data-row-key="item">
+        <thead><tr><th data-field="item">Data</th><th data-field="where">Where it lives or goes</th><th class="num" data-field="exposures">Exposures</th><th class="num" data-field="tb">TB</th><th data-field="status">Status</th><th data-field="note">Note</th></tr></thead>
+        <tbody data-draw="holdings-body"></tbody>
+      </table></div>
+    </div>
+
+    <div id="parts" class="card">
+      <h2>Download parts at NERSC</h2>
+      <p class="sub">The gap list is cut into 6 interleaved parts, one download job each; every file is checked against NOIRLab's md5 and retried if damaged.</p>
+      <div class="tw"><table data-source="parts" data-row-key="part">
+        <thead><tr><th data-field="part">Part</th><th data-field="kind">Runs on</th><th data-field="job">Job</th><th data-field="state">State</th><th class="num" data-field="mbs">MB/s now</th><th class="num" data-field="tb">TB done</th><th class="num" data-field="files">Files done</th><th class="num" data-field="bad_md5">Bad md5</th><th class="num" data-field="errors">Errors</th></tr></thead>
+        <tbody data-draw="parts-body"></tbody>
+      </table></div>
+    </div>
+
+    <div id="transfers" class="card">
+      <h2>Globus copies</h2>
+      <p class="sub">NERSC to Vista. Globus runs three of our copies at a time; the rest wait in its queue. A copy's NERSC files are deleted only after it succeeds with checksums verified.</p>
+      <div class="tw"><table data-source="transfers" data-row-key="task">
+        <thead><tr><th data-field="task">Task</th><th data-field="purpose">What</th><th data-field="label">Label</th><th data-field="state">State</th><th class="num" data-field="tb">TB copied</th><th class="num" data-field="files">Files</th><th class="num" data-field="files_total">of</th><th class="num" data-field="mbs">MB/s</th><th data-field="requested">Requested (UTC)</th></tr></thead>
+        <tbody data-draw="transfers-body"></tbody>
+      </table></div>
+    </div>
+
+    <div id="jobs" class="card">
+      <h2>NERSC jobs</h2>
+      <div class="tw"><table data-source="jobs" data-row-key="job">
+        <thead><tr><th data-field="job">Job</th><th data-field="name">Name</th><th data-field="queue">Queue</th><th data-field="state">State</th><th data-field="time">Run time</th><th data-field="where">Node or reason</th></tr></thead>
+        <tbody data-draw="jobs-body"></tbody>
+      </table></div>
+    </div>
+
+    <div id="measured" class="card">
+      <h2>Measured speeds</h2>
+      <p class="sub">Download and copy rates measured on each route since 2026-11-10.</p>
+      <div class="tw"><table data-source="measured" data-row-key="metric">
+        <thead><tr><th data-field="metric">What</th><th data-field="value">Measured</th><th data-field="source">Where from</th></tr></thead>
+        <tbody data-draw="measured-body"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="searches" class="pane" hidden>
+    <p class="lede">Searches by the climb's best programs over chosen 5 % parts of DECam's sky: <b data-draw="s-regions" data-source="search_totals" data-field="regions" data-row="0">—</b> regions and <b data-draw="s-exp" data-source="search_totals" data-field="exposures" data-row="0">—</b> exposures searched so far, <b data-draw="s-leads" data-source="search_totals" data-field="leads" data-row="0">—</b> leads sent to the novelty check.</p>
+    <div id="search-table" class="card">
+      <h2>The searches</h2>
+      <p class="sub">Recall is the share of findable known bodies the program found; reward is the task grader's weighted score.</p>
+      <div class="tw"><table data-source="searches" data-row-key="search">
+        <thead><tr><th data-field="search">Search</th><th data-field="state">State</th><th class="num" data-field="regions">Regions</th><th class="num" data-field="exposures">Exposures</th><th data-field="program">Program</th><th class="num" data-field="recall_pct">Recall %</th><th class="num" data-field="found">Found</th><th class="num" data-field="findable">of findable</th><th class="num" data-field="reward">Reward</th><th class="num" data-field="leads">Leads</th><th class="num" data-field="gpu_h">GPU-h</th><th data-field="note">Note</th></tr></thead>
+        <tbody data-draw="searches-body"></tbody>
+      </table></div>
+    </div>
+    <div id="search-map" class="card">
+      <h2>Where the searches are</h2>
+      <ul class="legend">
+        <li><span class="sw ring" data-c="0"></span>First 5 %</li>
+        <li><span class="sw ring" data-c="1"></span>Second 5 %</li>
+        <li><span class="sw ring" data-c="2"></span>Third 5 %</li>
+        <li><span class="sw"></span>Planned archive slices</li>
+        <li><span class="sw line"></span>Ecliptic and Galactic plane</li>
+      </ul>
+      <div class="map" data-draw="search-map" data-source="regions slices"></div>
+    </div>
+    <div id="region-table" class="card">
+      <h2>Regions</h2>
+      <div class="tw"><table data-source="regions" data-row-key="region">
+        <thead><tr><th data-field="region">Region</th><th data-field="search">Search</th><th data-field="label">Where</th><th class="num" data-field="deg2">deg²</th><th class="num" data-field="exposures">Exposures</th><th class="num" data-field="tb">TB</th><th data-field="years">Years</th><th class="num" data-field="seasons">Seasons</th></tr></thead>
+        <tbody data-draw="regions-body"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="atlas" class="pane" hidden>
+    <p class="lede">The whole usable public archive cut into runnable slices of at most 2.5 A100-hours: <b data-draw="a-slices" data-source="atlas_totals" data-field="slices" data-row="0">—</b> slices, <b data-draw="a-windows" data-source="atlas_totals" data-field="windows" data-row="0">—</b> windows of 3 nights or more, <b data-draw="a-exp" data-source="atlas_totals" data-field="exposures" data-row="0">—</b> exposures, <b data-draw="a-tb" data-source="atlas_totals" data-field="tb" data-row="0">—</b> TB, at most <b data-draw="a-h" data-source="atlas_totals" data-field="a100h" data-row="0">—</b> A100-hours. Planned 2026-11-12; the searches since use 3-degree regions over all years instead.</p>
+    <div id="atlas-map" class="card">
+      <h2>Slices on the sky</h2>
+      <div class="bar">
+        <select class="dash-select" data-draw="atlas-class" aria-label="Survey class" data-source="slice_classes"></select>
+        <span class="sub" data-draw="atlas-count">—</span>
+      </div>
+      <ul class="legend">
+        <li><span class="sw" data-c="0"></span>Singles</li>
+        <li><span class="sw" data-c="1"></span>Revisits</li>
+        <li><span class="sw" data-c="2"></span>Rolling</li>
+        <li><span class="sw" data-c="3"></span>Dense</li>
+        <li><span class="sw" data-c="4"></span>Deep</li>
+        <li><span class="sw line"></span>Ecliptic and Galactic plane</li>
+      </ul>
+      <div class="map" data-draw="atlas-map" data-source="slices"></div>
+    </div>
+    <div id="atlas-classes" class="card">
+      <h2>Survey classes</h2>
+      <p class="sub">Cadence (how often a field was revisited within a window) by sky type.</p>
+      <div class="tw"><table data-source="slice_classes" data-row-key="cls">
+        <thead><tr><th data-field="cadence">Cadence</th><th data-field="sky">Sky</th><th class="num" data-field="slices">Slices</th><th class="num" data-field="windows">Windows</th><th class="num" data-field="exposures">Exposures</th><th class="num" data-field="tb">TB</th><th class="num" data-field="a100h">A100-h</th></tr></thead>
+        <tbody data-draw="classes-body"></tbody>
+      </table></div>
+    </div>
+    <div id="atlas-list" class="card">
+      <h2>Largest slices</h2>
+      <p class="sub">The 150 slices with the most exposures in the chosen class.</p>
+      <div class="tw"><table data-source="slices" data-row-key="id">
+        <thead><tr><th data-field="id">Slice</th><th data-field="cadence">Cadence</th><th data-field="sky">Sky</th><th data-field="program">Program</th><th class="num" data-field="windows">Windows</th><th class="num" data-field="exposures">Exposures</th><th class="num" data-field="gb">GB</th><th class="num" data-field="a100h">A100-h</th><th data-field="first">First</th><th data-field="last">Last</th><th data-field="bands">Bands</th></tr></thead>
+        <tbody data-draw="slices-body"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="log" class="pane" hidden>
+    <div class="card">
+      <h2>Log</h2>
+      <div class="tw"><table data-source="events" data-row-key="t,text">
+        <thead><tr><th data-field="t">Time (Pacific)</th><th data-field="source">From</th><th data-field="text">What happened</th></tr></thead>
+        <tbody data-draw="events-body"></tbody>
+      </table></div>
+    </div>
+    <details id="how">
+      <summary>How this works and how to stop it</summary>
+      <ul>
+        <li>The gap list: every usable public DECam exposure (g r i z Y VR, 30 s or longer) with a full InstCal set at NOIRLab, minus what NERSC already holds (the DESI Legacy Surveys mirror and our first and second 5 % downloads).</li>
+        <li>Downloads run at NERSC only: four jobs in the free transfer queue on login nodes and two regular CPU nodes charged to $NERSC_CPU_ACCOUNT. Vista nodes are not used, since every Vista node-hour costs SUs.</li>
+        <li>Every 30 minutes a relay on the Mac sends newly finished files to Vista in one Globus copy and deletes their NERSC copies once it succeeds. The third 5 %'s gap files stay at NERSC for its search.</li>
+        <li>Old images (first and second 5 %) move to Vista in copies of about 0.5 TB; each is deleted at NERSC as soon as its copy succeeds, so space frees step by step.</li>
+        <li>Vista scratch has no quota but deletes files nobody has read for 10 days; searches run at NERSC and copy back what they need.</li>
+        <li>Stop all downloads: create <code>$NERSC_SCRATCH/decam-fill/STOP_ALL</code>. Stop the relay: <code>planet-search/fill/relay/STOP</code> on the Mac.</li>
+        <li>This page replaces the "DECam 5% Search" and "DECam Slice Atlas" pages. Claude updates it from NERSC, Vista and Globus status; it does not refresh by itself.</li>
+      </ul>
+    </details>
+  </section>
+</div>
+
+<script>
+// One dataset per list inside status.json or atlas.json.
+['summary', 'holdings', 'parts', 'transfers', 'jobs', 'history', 'events', 'searches', 'slices', 'slice_classes', 'measured', 'regions', 'dl_hist', 'dl_now', 'dl_xfer', 'dl_probes', 'dl_streams'].forEach((k) => {
+  dash.loader(k, {description: `The "${k}" list of its JSON file`, fn: ({answer}) => {
+    const a = typeof answer === 'string' ? JSON.parse(answer) : answer;
+    if (!a || !Array.isArray(a[k])) throw new Error(`the file has no "${k}" list`);
+    return a[k];
+  }});
+});
+dash.calc('search_totals', {inputs: ['searches'], title: 'Searched so far', description: 'Sums over the searches already run',
+  fn: (searches) => { const s = searches.filter((r) => r.state === 'searched');
+    return [{regions: s.reduce((a, r) => a + (+r.regions || 0), 0), exposures: s.reduce((a, r) => a + (+r.exposures || 0), 0), leads: s.reduce((a, r) => a + (+r.leads || 0), 0)}]; }});
+dash.calc('atlas_totals', {inputs: ['slices'], title: 'Archive map totals', description: 'Sums over every planned slice',
+  fn: (slices) => [{slices: slices.length, windows: slices.reduce((a, s) => a + (+s.windows), 0), exposures: slices.reduce((a, s) => a + (+s.exposures), 0),
+    tb: Math.round(slices.reduce((a, s) => a + (+s.gb), 0) / 100) / 10, a100h: Math.round(slices.reduce((a, s) => a + (+s.a100h), 0))}]});
+dash.calc('dl_total', {inputs: ['dl_now'], title: 'Downloads together', description: 'NOIRLab download MB/s summed over the devices, latest 10 minutes',
+  fn: (devices) => [{mbs: Math.round(devices.reduce((a, d) => a + (+d.mbs || 0), 0))}]});
+window.dmFmt = {
+  n: (v, d = 0) => (v === null || v === undefined || v === '') ? '—' : Number(v).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d}),
+  cls: (s) => /done|finished|on Vista|permanent|running|downloading|copying|searched/.test(s) ? 'st-ok' : /fail|cancel|refus|degrad|unreach/.test(s) ? 'st-bad' : /wait|queued|moving|paused|cool/.test(s) ? 'st-warn' : 'st-mute',
+};
+window.dmState = {cls: ''};
+window.dmCad = ['singles', 'revisits', 'rolling', 'dense', 'deep'];
+window.dmSearch = ['first 5 %', 'second 5 %', 'third 5 %'];
+document.querySelectorAll('.dm .sw[data-c]').forEach((s) => {
+  const c = dash.colors[+s.dataset.c] || 'var(--cds-chart-muted)';
+  if (s.classList.contains('ring')) s.style.borderColor = c; else s.style.background = c;
+});
+</script>
+
+<script>
+// Tabs: sections of this page, the open one in the link.
+const dmDraws = {movement: [], searches: ['searches-body', 'search-map', 'regions-body', 's-regions', 's-exp', 's-leads'],
+  atlas: ['a-slices', 'a-windows', 'a-exp', 'a-tb', 'a-h', 'atlas-class', 'atlas-count', 'atlas-map', 'classes-body', 'slices-body'], log: ['events-body']};
+function dmOpen(id, push) {
+  if (!dmDraws[id]) id = 'movement';
+  document.querySelectorAll('.dm .pane').forEach((p) => { p.hidden = p.id !== id; });
+  document.querySelectorAll('.dm .tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === id)));
+  if (push) dash.setLink(id);
+  dmDraws[id].forEach((n) => dash.draw(n));
+}
+document.querySelectorAll('.dm .tab').forEach((b) => b.addEventListener('click', () => dmOpen(b.dataset.tab, true)));
+dmOpen((location.hash || '').slice(1), false);
+window.addEventListener('beforeprint', () => document.querySelectorAll('.dm .pane').forEach((p) => { p.hidden = false; }));
+window.addEventListener('afterprint', () => dmOpen((location.hash || '').slice(1), false));
+</script>
+
+<script>
+const S1 = () => { const g = dash.data('summary'); return g.status === 'ok' && g.data.length ? g.data[0] : null; };
+const T = (name, field, digits) => dash.draw(name, (el) => { const r = S1(); el.textContent = r ? (field === 'asof' ? r[field] : window.dmFmt.n(r[field], digits)) : '—'; });
+T('lede-speed', 'mbs', 0); T('lede-globus', 'globus_mbs', 0); T('t-gl', 'globus_mbs', 0); T('t-gltb', 'globus_tb', 2);T('lede-fetched', 'fetched_tb', 2); T('lede-blank', 'blank_tb', 1); T('lede-scratch', 'nersc_tib', 2); T('lede-asof', 'asof');
+T('t-mbs', 'mbs', 0); T('t-fetched', 'fetched_tb', 2); T('t-blank', 'blank_tb', 1); T('t-pct', 'fetched_pct', 2); T('t-a15', 'a15_done', 0); T('t-a15t', 'a15_total', 0);
+T('t-vista', 'on_vista_tb', 2); T('t-rel', 'released_tb', 2); T('t-nersc', 'nersc_tib', 2); T('t-vscr', 'vista_scratch_tb', 1); T('t-eta', 'eta_days', 1);
+dash.draw('t-parts', (el) => { const r = S1(); el.textContent = r ? `${r.parts_downloading} of 6 parts running, ${r.parts_waiting} waiting for space` : '—'; });
+const C1 = (calc, name, field, digits) => dash.draw(name, (el) => { const g = dash.data(calc); const r = g.status === 'ok' && g.data && g.data[0]; el.textContent = r ? window.dmFmt.n(r[field], digits) : '—'; });
+C1('search_totals', 's-regions', 'regions', 0); C1('search_totals', 's-exp', 'exposures', 0); C1('search_totals', 's-leads', 'leads', 0);
+C1('atlas_totals', 'a-slices', 'slices', 0); C1('atlas_totals', 'a-windows', 'windows', 0); C1('atlas_totals', 'a-exp', 'exposures', 0); C1('atlas_totals', 'a-tb', 'tb', 1); C1('atlas_totals', 'a-h', 'a100h', 0);
+
+function rows(body, id, cols, pick) {
+  const g = dash.data(id);
+  if (g.status !== 'ok') { body.replaceChildren(); const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = cols.length; td.textContent = g.status === 'loading' ? 'Loading…' : 'Failed to load'; tr.append(td); body.append(tr); return; }
+  const data = pick ? pick(g.data) : g.data;
+  body.replaceChildren(...data.map((r) => { const tr = document.createElement('tr');
+    cols.forEach(([f, kind, d]) => { const td = document.createElement('td'); const v = r[f];
+      if (kind === 'num') { td.className = 'num'; td.textContent = window.dmFmt.n(v, d || 0); }
+      else if (kind === 'pill') { const s = document.createElement('span'); s.className = 'pill ' + window.dmFmt.cls(String(v)); s.textContent = v; td.append(s); }
+      else if (kind === 'wrap') { td.className = 'wrap'; td.textContent = v ?? ''; }
+      else td.textContent = v ?? '';
+      tr.append(td); });
+    return tr; }));
+}
+dash.draw('holdings-body', (b) => rows(b, 'holdings', [['item'], ['where', 'wrap'], ['exposures', 'num'], ['tb', 'num', 2], ['status', 'pill'], ['note', 'wrap']]));
+dash.draw('parts-body', (b) => rows(b, 'parts', [['part'], ['kind'], ['job'], ['state', 'pill'], ['mbs', 'num'], ['tb', 'num', 3], ['files', 'num'], ['bad_md5', 'num'], ['errors', 'num']]));
+dash.draw('transfers-body', (b) => rows(b, 'transfers', [['task'], ['purpose'], ['label'], ['state', 'pill'], ['tb', 'num', 3], ['files', 'num'], ['files_total', 'num'], ['mbs', 'num'], ['requested']]));
+dash.draw('jobs-body', (b) => rows(b, 'jobs', [['job'], ['name'], ['queue'], ['state', 'pill'], ['time'], ['where']]));
+dash.draw('measured-body', (b) => rows(b, 'measured', [['metric', 'wrap'], ['value', 'wrap'], ['source', 'wrap']]));
+dash.draw('events-body', (b) => rows(b, 'events', [['t'], ['source'], ['text', 'wrap']]));
+dash.draw('searches-body', (b) => rows(b, 'searches', [['search'], ['state', 'pill'], ['regions', 'num'], ['exposures', 'num'], ['program'], ['recall_pct', 'num'], ['found', 'num'], ['findable', 'num'], ['reward', 'num', 4], ['leads', 'num'], ['gpu_h', 'num', 1], ['note', 'wrap']]));
+dash.draw('dev-body', (b) => rows(b, 'dl_now', [['device'], ['state', 'pill'], ['mbs', 'num'], ['streams'], ['cool_until'], ['files', 'num'], ['bad_pct', 'num', 1], ['errors', 'num'], ['note', 'wrap']]));
+dash.draw('budget-body', (b) => rows(b, 'dl_streams', [['t'], ['device'], ['why', 'wrap'], ['change'], ['until']]));
+C1('dl_total', 'dev-sum', 'mbs', 0);
+window.dmGoal = 200;   // MB/s, all devices together (the user's goal, 2026-11-20)
+dash.draw('dev-goal', (el) => { el.textContent = window.dmFmt.n(window.dmGoal); });
+dash.draw('xfer-body', (b) => rows(b, 'dl_xfer', [['route'], ['how'], ['mbs', 'num', 1], ['last_mbs', 'num', 1], ['last_at']]));
+dash.draw('probe-body', (b) => rows(b, 'dl_probes', [['t'], ['device'], ['mbs', 'num'], ['files', 'num'], ['bad', 'num'], ['errors', 'num'], ['note', 'wrap']]));
+dash.draw('dev-asof', (el) => { const g = dash.data('dl_now'); el.textContent = g.status === 'ok' && g.data.length ? g.data[0].asof : '—'; });
+// One line per field of dl_hist, one point per watch cycle; a null value leaves a gap in the line.
+function dmMulti(el, fields, names, label, digits, goal) {
+  const g = dash.data('dl_hist');
+  el.replaceChildren();
+  if (g.status !== 'ok') { const p = document.createElement('p'); p.className = 'sub'; p.textContent = g.status === 'loading' ? 'Loading…' : 'Failed to load'; el.append(p); return; }
+  const parse = d3.timeParse('%Y-%m-%d %H:%M');
+  const rowsT = g.data.map((r) => ({t: parse(r.t), raw: r})).filter((p) => p.t);
+  const series = fields.map((f, si) => ({f, color: dash.colors[si], pts: rowsT.map((p) => ({t: p.t, v: (p.raw[f] === null || p.raw[f] === undefined) ? null : +p.raw[f]})).filter((p) => p.v !== null && !isNaN(p.v))}));
+  const W = Math.max(280, el.clientWidth || 400), H = 200, m = {l: 40, r: 12, t: 10, b: 24};
+  const ext = rowsT.length > 1 ? d3.extent(rowsT, (p) => p.t) : [rowsT.length ? d3.timeHour.offset(rowsT[0].t, -1) : new Date(), rowsT.length ? d3.timeHour.offset(rowsT[0].t, 1) : new Date()];
+  if (+ext[0] === +ext[1]) { ext[0] = d3.timeMinute.offset(ext[0], -30); ext[1] = d3.timeMinute.offset(ext[1], 30); }
+  const x = d3.scaleTime().domain(ext).range([m.l, W - m.r]);
+  const ymax = Math.max(10, goal || 0, d3.max(series, (s) => d3.max(s.pts, (p) => p.v)) || 0) * 1.08;
+  const y = d3.scaleLinear().domain([0, ymax]).nice().range([H - m.b, m.t]);
+  const svg = d3.select(el).append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', label);
+  svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / 110))).tickSizeOuter(0)).call((a) => a.selectAll('line,path').style('stroke', 'var(--cds-chart-axis)'));
+  svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r))).call((a) => { a.select('.domain').remove(); a.selectAll('line').style('stroke', 'var(--cds-chart-grid)'); });
+  if (goal) { svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y(goal)).attr('y2', y(goal)).style('stroke', 'var(--cds-chart-reference)').style('stroke-dasharray', '4 3');
+    svg.append('text').attr('x', W - m.r).attr('y', y(goal) - 3).attr('text-anchor', 'end').text('goal ' + window.dmFmt.n(goal)); }
+  if (!series.some((s) => s.pts.length)) { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No points yet'); return; }
+  series.forEach((s) => {
+    svg.append('path').datum(s.pts).attr('d', d3.line().x((p) => x(p.t)).y((p) => y(p.v))).style('fill', 'none').style('stroke', s.color).style('stroke-width', 2);
+    svg.append('g').selectAll('circle').data(s.pts).join('circle').attr('cx', (p) => x(p.t)).attr('cy', (p) => y(p.v)).attr('r', 3).style('fill', s.color);
+  });
+  const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true; el.append(tip);
+  svg.on('pointermove', (ev) => { const [mx] = d3.pointer(ev); const p = rowsT[d3.bisector((q) => q.t).center(rowsT, x.invert(mx))]; if (!p) return;
+    tip.hidden = false; tip.textContent = `${p.raw.t}: ` + fields.map((f, si) => `${names[si]} ${window.dmFmt.n(p.raw[f], digits)}`).join(', ') + ' MB/s';
+    tip.style.left = Math.min(W - 250, Math.max(0, x(p.t) - 80)) + 'px'; tip.style.top = '4px'; }).on('pointerleave', () => { tip.hidden = true; });
+}
+dash.draw('dev-chart', (el) => dmMulti(el, ['nersc', 'ls6', 'vista', 'mac', 'sum'], ['NERSC', 'Lonestar6', 'Vista', 'Mac', 'All together'], 'Download speed from NOIRLab on each device and all together, against the goal, over time', 0, window.dmGoal));
+dash.draw('xfer-chart', (el) => dmMulti(el, ['m2n', 'n2v', 'l2v', 'l2n', 'v2n'], ['Mac to NERSC', 'NERSC to Vista', 'Lonestar6 to Vista', 'Lonestar6 to NERSC', 'Vista to NERSC'], 'Copy speed on each route between devices over time', 0));
+dash.draw('regions-body', (b) => rows(b, 'regions', [['region'], ['search'], ['label'], ['deg2', 'num', 1], ['exposures', 'num'], ['tb', 'num', 2], ['years'], ['seasons', 'num']]));
+dash.draw('classes-body', (b) => rows(b, 'slice_classes', [['cadence'], ['sky'], ['slices', 'num'], ['windows', 'num'], ['exposures', 'num'], ['tb', 'num', 1], ['a100h', 'num']]));
+const dmPickSlices = (data) => data.filter((s) => !window.dmState.cls || `${s.cadence} | ${s.sky}` === window.dmState.cls);
+dash.draw('slices-body', (b) => rows(b, 'slices', [['id'], ['cadence'], ['sky'], ['program'], ['windows', 'num'], ['exposures', 'num'], ['gb', 'num', 1], ['a100h', 'num', 2], ['first'], ['last'], ['bands']],
+  (data) => dmPickSlices(data).slice().sort((a, b2) => b2.exposures - a.exposures).slice(0, 150)));
+dash.draw('atlas-class', (sel) => {
+  const g = dash.data('slice_classes');
+  sel.replaceChildren(new Option('All survey classes', ''), ...(g.status === 'ok' ? g.data : []).map((r) => new Option(`${r.cadence}, ${r.sky}`, r.cls)));
+  sel.value = window.dmState.cls;
+  sel.onchange = () => { window.dmState.cls = sel.value; ['atlas-map', 'atlas-count', 'slices-body'].forEach((n) => dash.draw(n)); };
+});
+dash.draw('atlas-count', (el) => { const g = dash.data('slices'); if (g.status !== 'ok') { el.textContent = '—'; return; }
+  const s = dmPickSlices(g.data); el.textContent = `${window.dmFmt.n(s.length)} slices, ${window.dmFmt.n(s.reduce((a, r) => a + r.exposures, 0))} exposures, ${window.dmFmt.n(s.reduce((a, r) => a + r.gb, 0) / 1000, 1)} TB`; });
+
+function lineChart(el, field, opts) {
+  const g = dash.data('history');
+  el.replaceChildren();
+  if (g.status !== 'ok') { const p = document.createElement('p'); p.className = 'sub'; p.textContent = g.status === 'loading' ? 'Loading…' : 'Failed to load'; el.append(p); return; }
+  const parse = d3.timeParse('%Y-%m-%d %H:%M');
+  const series = (Array.isArray(field) ? field : [field]).map((f, si) => ({f, color: dash.colors[si],
+    pts: g.data.map((r) => ({t: parse(r.t), v: (r[f] === null || r[f] === undefined) ? null : +r[f], raw: r})).filter((p) => p.t && p.v !== null && !isNaN(p.v))}));
+  const all = series.flatMap((s) => s.pts), pts = series[0].pts;
+  const W = Math.max(280, el.clientWidth || 400), H = 190, m = {l: 40, r: 12, t: 10, b: 24};
+  const x = d3.scaleTime().domain(all.length > 1 ? d3.extent(all, (p) => p.t) : [all.length ? d3.timeHour.offset(all[0].t, -1) : new Date(), all.length ? d3.timeHour.offset(all[0].t, 1) : new Date()]).range([m.l, W - m.r]);
+  const ymax = Math.max(opts.ymin || 1, d3.max(all, (p) => p.v) || 0, ...(opts.lines || []).map((l) => l.v)) * 1.08;
+  const y = d3.scaleLinear().domain([0, ymax]).nice().range([H - m.b, m.t]);
+  const svg = d3.select(el).append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', opts.label);
+  svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / 110))).tickSizeOuter(0)).call((a) => a.selectAll('line,path').style('stroke', 'var(--cds-chart-axis)'));
+  svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r))).call((a) => { a.select('.domain').remove(); a.selectAll('line').style('stroke', 'var(--cds-chart-grid)'); });
+  (opts.lines || []).forEach((l) => { svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y(l.v)).attr('y2', y(l.v)).style('stroke', l.color).style('stroke-dasharray', '4 3');
+    svg.append('text').attr('x', W - m.r).attr('y', y(l.v) - 3).attr('text-anchor', 'end').text(l.name); });
+  if (!all.length) { svg.append('text').attr('x', W / 2).attr('y', H / 2).attr('text-anchor', 'middle').text('No points yet'); return; }
+  series.forEach((s) => {
+    svg.append('path').datum(s.pts).attr('d', d3.line().x((p) => x(p.t)).y((p) => y(p.v))).style('fill', 'none').style('stroke', s.color).style('stroke-width', 2);
+    svg.append('g').selectAll('circle').data(s.pts).join('circle').attr('cx', (p) => x(p.t)).attr('cy', (p) => y(p.v)).attr('r', 3.5).style('fill', s.color);
+  });
+  const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true; el.append(tip);
+  const rowsT = g.data.map((r) => ({t: parse(r.t), raw: r})).filter((p) => p.t);
+  svg.on('pointermove', (ev) => { const [mx] = d3.pointer(ev); const i = d3.bisector((p) => p.t).center(rowsT, x.invert(mx)); const p = rowsT[i]; if (!p) return;
+    const vals = series.map((s, si) => { const v = p.raw[s.f]; return (opts.names ? opts.names[si] + ' ' : '') + ((v === null || v === undefined) ? '—' : window.dmFmt.n(v, opts.digits)); });
+    tip.hidden = false; tip.textContent = `${p.raw.t}: ${vals.join(', ')} ${opts.unit}`;
+    const yv = d3.max(series, (s) => +p.raw[s.f] || 0);
+    tip.style.left = Math.min(W - 230, Math.max(0, x(p.t) - 60)) + 'px'; tip.style.top = Math.max(0, y(yv) - 34) + 'px'; }).on('pointerleave', () => { tip.hidden = true; });
+}
+dash.draw('speed-chart', (el) => lineChart(el, ['mbs', 'gl_mbs'], {unit: 'MB/s', digits: 0, ymin: 100, names: ['download', 'Globus'], label: 'Download speed from NOIRLab and Globus copy speed to Vista over time'}));
+dash.draw('scratch-chart', (el) => lineChart(el, 'nersc_tib', {unit: 'TiB', digits: 2, ymin: 20, label: 'NERSC scratch use over time',
+  lines: [{v: 20, name: 'quota 20', color: 'var(--cds-chart-status-critical)'}, {v: 18.5, name: 'pause 18.5', color: 'var(--cds-chart-reference)'}]}));
+
+// Sky maps: right ascension runs right to left, as on the sky.
+function dmPlanes() {
+  const eps = 23.4393 * Math.PI / 180, R = [[-0.0548755604, -0.8734370902, -0.4838350155], [0.4941094279, -0.4448296300, 0.7469822445], [-0.8676661490, -0.1980763734, 0.4559837762]];
+  const ecl = [], gal = [];
+  for (let k = 0; k <= 360; k += 2) { const l = k * Math.PI / 180;
+    ecl.push([((Math.atan2(Math.cos(eps) * Math.sin(l), Math.cos(l)) * 180 / Math.PI) + 360) % 360, Math.asin(Math.sin(eps) * Math.sin(l)) * 180 / Math.PI]);
+    const g = [Math.cos(l), Math.sin(l), 0]; const q = [0, 1, 2].map((j) => R[0][j] * g[0] + R[1][j] * g[1] + R[2][j] * g[2]);
+    gal.push([((Math.atan2(q[1], q[0]) * 180 / Math.PI) + 360) % 360, Math.asin(q[2]) * 180 / Math.PI]); }
+  return [ecl, gal];
+}
+function dmSky(el, label) {
+  el.replaceChildren();
+  const W = Math.max(300, el.clientWidth || 600), m = {l: 34, r: 8, t: 8, b: 22}, H = Math.round((W - m.l - m.r) * 135 / 360) + m.t + m.b;
+  const x = d3.scaleLinear().domain([360, 0]).range([m.l, W - m.r]), y = d3.scaleLinear().domain([-90, 45]).range([H - m.b, m.t]);
+  const svg = d3.select(el).append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', label);
+  svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x).tickValues([0, 60, 120, 180, 240, 300, 360]).tickFormat((d) => d + '°').tickSize(-(H - m.t - m.b)))
+    .call((a) => { a.select('.domain').remove(); a.selectAll('line').style('stroke', 'var(--cds-chart-grid)'); });
+  svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).tickValues([-90, -60, -30, 0, 30]).tickFormat((d) => d + '°').tickSize(-(W - m.l - m.r)))
+    .call((a) => { a.select('.domain').remove(); a.selectAll('line').style('stroke', 'var(--cds-chart-grid)'); });
+  dmPlanes().forEach((pts) => { const segs = [[]]; pts.forEach((p, i) => { if (i && Math.abs(p[0] - pts[i - 1][0]) > 180) segs.push([]); segs[segs.length - 1].push(p); });
+    segs.forEach((s) => svg.append('path').datum(s).attr('d', d3.line().x((p) => x(p[0])).y((p) => y(p[1]))).style('fill', 'none').style('stroke', 'var(--cds-chart-reference)').style('stroke-dasharray', '4 3')); });
+  const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true; el.append(tip);
+  return {svg, x, y, W, H, tip};
+}
+function dmHover(k, pts, text) {
+  if (!pts.length) return;
+  const dl = d3.Delaunay.from(pts, (p) => p.px, (p) => p.py);
+  k.svg.on('pointermove', (ev) => { const [mx, my] = d3.pointer(ev); const i = dl.find(mx, my); const p = pts[i];
+    if (!p || Math.hypot(p.px - mx, p.py - my) > 14) { k.tip.hidden = true; return; }
+    k.tip.hidden = false; k.tip.textContent = text(p.d);
+    k.tip.style.left = Math.min(k.W - 330, Math.max(0, p.px + 10)) + 'px'; k.tip.style.top = Math.max(0, p.py - 40) + 'px'; }).on('pointerleave', () => { k.tip.hidden = true; });
+}
+dash.draw('search-map', (el) => {
+  const r = dash.data('regions'), s = dash.data('slices');
+  if (r.status !== 'ok') { el.replaceChildren(); const p = document.createElement('p'); p.className = 'sub'; p.textContent = r.status === 'loading' ? 'Loading…' : 'Failed to load'; el.append(p); return; }
+  const k = dmSky(el, 'Sky map of the regions of the three 5 % searches over the planned archive slices');
+  if (s.status === 'ok') k.svg.append('g').selectAll('circle').data(s.data).join('circle').attr('cx', (d) => k.x(d.ra)).attr('cy', (d) => k.y(d.dec)).attr('r', 1.2).style('fill', 'var(--cds-chart-muted)').style('opacity', 0.6);
+  const ppd = (k.x(0) - k.x(1));
+  k.svg.append('g').selectAll('ellipse').data(r.data).join('ellipse').attr('cx', (d) => k.x(d.ra)).attr('cy', (d) => k.y(d.dec))
+    .attr('rx', (d) => Math.max(2.5, Math.sqrt(d.deg2 / Math.PI) * ppd / Math.max(0.2, Math.cos(d.dec * Math.PI / 180)))).attr('ry', (d) => Math.max(2.5, Math.sqrt(d.deg2 / Math.PI) * ppd))
+    .style('fill', 'none').style('stroke-width', 1.5).style('stroke', (d) => dash.colors[Math.max(0, window.dmSearch.indexOf(d.search))]);
+  dmHover(k, r.data.map((d) => ({d, px: k.x(d.ra), py: k.y(d.dec)})), (d) => `${d.search}, ${d.region}: ${d.label} · ${window.dmFmt.n(d.exposures)} exposures, ${window.dmFmt.n(d.tb, 2)} TB, ${d.years}`);
+});
+dash.draw('atlas-map', (el) => {
+  const s = dash.data('slices');
+  if (s.status !== 'ok') { el.replaceChildren(); const p = document.createElement('p'); p.className = 'sub'; p.textContent = s.status === 'loading' ? 'Loading…' : 'Failed to load'; el.append(p); return; }
+  const k = dmSky(el, 'Sky map of all planned archive slices, coloured by cadence');
+  const on = dmPickSlices(s.data), onSet = new Set(on.map((d) => d.id));
+  if (window.dmState.cls) k.svg.append('g').selectAll('circle').data(s.data.filter((d) => !onSet.has(d.id))).join('circle').attr('cx', (d) => k.x(d.ra)).attr('cy', (d) => k.y(d.dec)).attr('r', 1.1).style('fill', 'var(--cds-chart-muted)').style('opacity', 0.4);
+  k.svg.append('g').selectAll('circle').data(on).join('circle').attr('cx', (d) => k.x(d.ra)).attr('cy', (d) => k.y(d.dec)).attr('r', (d) => 1.4 + Math.sqrt(d.exposures) / 6)
+    .style('fill', (d) => dash.colors[Math.max(0, window.dmCad.indexOf(d.cadence))]).style('opacity', 0.75);
+  dmHover(k, on.map((d) => ({d, px: k.x(d.ra), py: k.y(d.dec)})), (d) => `${d.id} · ${d.cadence}, ${d.sky} · ${d.program} · ${d.windows} windows, ${window.dmFmt.n(d.exposures)} exposures, ${window.dmFmt.n(d.gb, 1)} GB, ${window.dmFmt.n(d.a100h, 2)} A100-h · ${d.first} to ${d.last}`);
+});
+</script>

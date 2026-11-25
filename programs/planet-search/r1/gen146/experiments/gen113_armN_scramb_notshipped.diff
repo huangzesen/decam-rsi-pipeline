@@ -1,0 +1,91 @@
+diff -ru -x NOTES.md -x experiments -x __pycache__ $RSI_SANDBOX/r1/gen113/workspace/submission/stackd/finder.py submission/stackd/finder.py
+--- $RSI_SANDBOX/r1/gen113/workspace/submission/stackd/finder.py	2026-11-06 14:56:50
++++ submission/stackd/finder.py	2026-11-06 21:51:33
+@@ -1321,6 +1321,54 @@
+     except Exception:
+         RCLIP = 0.0
+ 
++    # gen 113 (arm N, TNO_SCRAMB, default 0 = off): time-scrambled null for kind-3 tracks.  The same refined track is
++    # re-sampled with the night order permuted (exposure i of night a is read at the path position predicted for night
++    # pi(a)), so the samples lie on the same pixel path but do not follow the body.  SCRAMB > 0: the clipped stack used
++    # for the kind-3 z becomes scq - SCRAMB * mean(scrambled clipped stacks) (null rows transformed the same way).
++    SCRAMB = float(os.environ.get("TNO_SCRAMB", "0") or 0)
++    SCR_NP = int(os.environ.get("TNO_SCRAMB_NP", "8"))
++    SCR_LOG = bool(os.environ.get("TNO_SCRAMB_LOG")) or bool(os.environ.get("TNO_STAGE_DUMP"))
++    scr_src_ = []
++    try:
++        if (SCRAMB > 0 or SCR_LOG) and len(nights_idx) >= 3:
++            rg_ = np.random.default_rng(113)
++            nn__ = len(nights_idx)
++            for _ in range(SCR_NP):
++                while True:
++                    pi_ = rg_.permutation(nn__)
++                    if not np.any(pi_ == np.arange(nn__)):
++                        break
++                src_ = np.zeros(N, np.int64)
++                for a_, idx_ in enumerate(nights_idx):
++                    tgt_ = nights_idx[pi_[a_]]
++                    for k_, i_ in enumerate(idx_):
++                        src_[i_] = tgt_[k_ % len(tgt_)]
++                scr_src_.append(src_)
++    except Exception as ex:
++        log("scramb setup failed:", repr(ex)[:200]); scr_src_ = []
++
++    def scramb_scores(S, clip):
++        """mean / std / max over SCR_NP night permutations of the clipped stack of S (K,6); None if unavailable."""
++        if not scr_src_ or len(S) == 0:
++            return None
++        u = orbit.predict_dirs_b(S, t_ep, t, obs)
++        q = u @ TF0.T
++        ix0 = np.rint((q[..., 0] / q[..., 2] - x0) / PIX).astype(np.int64)
++        iy0 = np.rint((q[..., 1] / q[..., 2] - y0) / PIX).astype(np.int64)
++        out_ = []
++        for src_ in scr_src_:
++            ix = ix0[:, src_]; iy = iy0[:, src_]
++            okk = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
++            lin = np.where(okk, iy * W + ix, 0) + np.arange(N)[None] * (H * W)
++            lt_ = torch.from_numpy(lin.ravel()).to(dev)
++            v = maps.reshape(-1)[lt_].float().reshape(lin.shape).cpu().numpy()
++            c = cov.reshape(-1)[lt_].cpu().numpy().reshape(lin.shape) & okk
++            v = np.where(c, v, 0)
++            out_.append(total(np.minimum(v, clip), c))
++        o_ = np.stack(out_, 1)
++        return o_.mean(1), o_.std(1), o_.max(1)
++    scr_cache_ = {}
++
+     def to_cands(S, sc, nn_, kd=None, n3=None, boost=True, scq=None):
+         out = []
+         ref_ = sc
+@@ -1342,6 +1390,17 @@
+         try:
+             if RCLIP > 0 and kd is not None and scq is not None and len(kd) == len(S) == len(scq) and (kd == 3).any():
+                 scq = np.asarray(scq, float)
++                if SCRAMB > 0:
++                    try:
++                        n0_ = scr_cache_.get("n", 0)
++                        if n0_ < len(S):   # refined list only grows; cache the scrambled means
++                            m_ = scramb_scores(np.asarray(S[n0_:]), RCLIP)
++                            if m_ is not None:
++                                scr_cache_["m"] = np.r_[scr_cache_.get("m", np.zeros(0)), m_[0]]; scr_cache_["n"] = len(S)
++                        if scr_cache_.get("n", 0) == len(S):
++                            scq = scq - SCRAMB * scr_cache_["m"][:len(S)]
++                    except Exception as ex:
++                        log("scramb failed:", repr(ex)[:200])
+                 if int((kd == 2).sum()) >= 30:
+                     rq_ = scq[kd == 2]
+                 elif int((kd >= 2).sum()) >= 30:
+@@ -1738,8 +1797,13 @@
+     if refined and SDD_:
+         try:
+             os.makedirs(SDD_, exist_ok=True); vR_, cR_ = score_states(np.array(refined))
++            try:
++                sm_ = scramb_scores(np.array(refined), RCLIP if RCLIP > 0 else 3.0)
++            except Exception as ex:
++                log("scramb dump failed:", repr(ex)[:200]); sm_ = None
+             np.savez(os.path.join(SDD_, "refined_vc.npz"), v=vR_.astype(np.float32), c=cR_, wf=np.asarray(wf, np.float32),
+-                     night=np.asarray(night), rsc=np.array(rsc), rkd=np.array(rkd), rng=np.array(rng_))
++                     night=np.asarray(night), rsc=np.array(rsc), rkd=np.array(rkd), rng=np.array(rng_),
++                     scq=np.array(rscq), **({} if sm_ is None else dict(scr_m=sm_[0], scr_s=sm_[1], scr_x=sm_[2])))
+             sdump_("refined", [dict(epoch_mjd=float(t_ep), state=[float(x) for x in refined[i]], p=0.5,
+                                     sc=float(rsc[i]), ng=int(rng_[i]), kd=int(rkd[i]), j=int(order_[i]) if i < len(order_) else -1,
+                                     seed=[float(x) for x in states[order_[i]]] if i < len(order_) else None)

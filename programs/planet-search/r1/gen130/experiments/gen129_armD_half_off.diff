@@ -1,0 +1,310 @@
+diff -ru -x experiments -x __pycache__ sub2/stackd/fstk.py armD/stackd/fstk.py
+--- sub2/stackd/fstk.py	2026-11-08 00:47:16
++++ armD/stackd/fstk.py	2026-11-08 00:50:25
+@@ -60,6 +60,16 @@
+     # (window i covers 1" px i, i+1, centre i+0.5) instead of the stride-2 2" pool, so the nearest-neighbour sample is
+     # within +-0.25 canvas cell of the needed position instead of +-0.5.  Same per-cell noise distribution (2x2 max).
+     FINE = os.environ.get("TNO_FSTK_FINE", "0") == "1"
++    # gen 129 arm D (TNO_FSTK_HALF, default 0 = off): half-cell phase planes.  Each co-add is warped 4 times with the
++    # canvas grid offset by (0|0.5, 0|0.5) cell (exact 1" offsets of the stride-1 fine source, so HALF implies FINE);
++    # a hypothesis' per-co-add shift is rounded to half cells h, using plane (h%2) at integer shift h//2.  Same
++    # hypothesis grid; the gen128 tree treats (co-add, phase) as the leaf identity.  Falls back to the 1-plane path
++    # per slice when the 4x co-add memory exceeds TNO_FSTK_HALF_MB, and for the rest of the run on any slice exception.
++    HALF = os.environ.get("TNO_FSTK_HALF", "0") == "1"
++    HALF_MB = float(os.environ.get("TNO_FSTK_HALF_MB", "6000"))
++    if HALF and not FINE:
++        FINE = True
++        log("fstk half: phase planes need the stride-1 source, FINE enabled")
+     FINE_MB = float(os.environ.get("TNO_FSTK_FINE_MB", "6000"))   # precompute the stride-1 maps only under this size
+     smaps = smaps1 = None
+     if FINE:
+@@ -218,22 +228,34 @@
+             mx_old = int(np.abs(offs).max() + vmax * mdt + 8)
+             mx = int(vmax * mdt + 8) if TIGHT else mx_old
+             HD, WD = H2 + 2 * mx, W2 + 2 * mx
++            NPH = 1
++            if HALF:
++                mb_ = K * 4 * HD * WD * (2 + (2 if RS else 0) + 1) / 1e6
++                if mb_ <= HALF_MB:
++                    NPH = 4
++                else:
++                    log(f"fstk half: d={d:.2f} phase planes need {mb_:.0f} MB > {HALF_MB:.0f}, 1-plane path for this slice")
+             TD_t = torch.tensor(TD, dtype=torch.float32, device=dev)
+-            gxd = (torch.arange(WD, device=dev, dtype=torch.float32) - (WD - 1) / 2) * SP
+-            gyd = (torch.arange(HD, device=dev, dtype=torch.float32) - (HD - 1) / 2) * SP
+-            Dm = torch.zeros((K, HD, WD), dtype=torch.float16, device=dev)
++            gxd0 = (torch.arange(WD, device=dev, dtype=torch.float32) - (WD - 1) / 2) * SP
++            gyd0 = (torch.arange(HD, device=dev, dtype=torch.float32) - (HD - 1) / 2) * SP
++            Dm = torch.zeros((K * NPH, HD, WD), dtype=torch.float16, device=dev)
+             Dm3 = None
+             if RS:
+                 try:
+-                    Dm3 = torch.zeros((K, HD, WD), dtype=torch.float16, device=dev)
++                    Dm3 = torch.zeros((K * NPH, HD, WD), dtype=torch.float16, device=dev)
+                 except Exception:
+                     Dm3 = None
+             for k_, n in enumerate(sel):
++              if FINE:
++                  src_ = smaps1[k_].float() if smaps1 is not None else _src1(k_)
++              else:
++                  src_ = smaps[k_].float()
++              for ph_ in range(NPH):
+                 rows_ = []
+-                if FINE:
+-                    src_ = smaps1[k_].float() if smaps1 is not None else _src1(k_)
+-                else:
+-                    src_ = smaps[k_].float()
++                # plane ph_ = py*2 + px holds canvas position (col + px/2, row + py/2)
++                gxd = gxd0 + (0.5 * SP) * (ph_ % 2) if ph_ % 2 else gxd0
++                gyd = gyd0 + (0.5 * SP) * (ph_ // 2) if ph_ // 2 else gyd0
++                pl_ = int(gid_[k_]) * NPH + ph_
+                 for y0_ in range(0, HD, 1024):
+                     gy_ = gyd[y0_:y0_ + 1024]
+                     Wd = TD_t[2][None, None] + gxd[None, :, None] * TD_t[0][None, None] + gy_[:, None, None] * TD_t[1][None, None]
+@@ -252,14 +274,15 @@
+                     del Wd, X, q, sx, sy, ux, uy, grid
+                 fr_ = torch.cat(rows_, 0)
+                 if Dm3 is not None:
+-                    Dm3[int(gid_[k_])] += (fr_ * float(wsel[k_])) if DW else fr_
++                    Dm3[pl_] += (fr_ * float(wsel[k_])) if DW else fr_
+                     fr_ = fr_.clamp(-DCLIP, DCLIP)
+                 if DW:
+                     fr_ *= float(wsel[k_])
+-                Dm[int(gid_[k_])] += fr_
+-                del fr_, rows_, src_
++                Dm[pl_] += fr_
++                del fr_, rows_
++              del src_
+             # zero-median co-adds on covered px (max-pooled S/N is biased positive)
+-            for k_ in range(K):
++            for k_ in range(K * NPH):
+                 v_ = Dm[k_, ::3, ::3].float(); v_ = v_[v_ != 0]
+                 if v_.numel() > 100:
+                     m_ = float(torch.median(v_))
+@@ -275,7 +298,7 @@
+             # track misaligned by up to 1 pooled px in some co-adds keeps its signal (probes show the coarse stack only
+             # survives within ~0.04 au of the true distance).  Untested in full runs; see NOTES.
+             if os.environ.get("TNO_FSTK_DIL", "0") != "0":
+-                for k_ in range(K):
++                for k_ in range(K * NPH):
+                     Dm[k_] = F.max_pool2d(Dm[k_][None, None].float(), 3, 1, 1)[0, 0].half()
+             t_warp = time.time() - t_d0
+             # velocity grid (search px / day) inside the prior, ordered by closeness to prograde circular
+@@ -301,20 +324,36 @@
+             # of shift (sx, sy) is the contiguous range [(P+sy)*WD + P+sx, ... + Hc*WD) evaluated at full row width
+             # (columns >= Wc are margin garbage, discarded).  Contiguous adds run ~4x faster than strided slices on MPS.
+             # Optional int8 (TNO_FSTK_I8, default 1): scale so the sum of the co-adds' max |value| fits in int8.
+-            amax = [float(Dm[k_].abs().max()) for k_ in range(K)]
++            if NPH == 1:
++                amax = [float(Dm[k_].abs().max()) for k_ in range(K)]
++            else:   # int8 bound: sum over co-adds of the max |value| over the co-add's planes
++                amax = [float(Dm[k_ * NPH:(k_ + 1) * NPH].abs().max()) for k_ in range(K)]
+             qs = 127.0 / max(sum(amax), 1e-6)
+             use8 = I8 and qs >= 1.5
+             if use8:
+-                Dq = torch.round(Dm.float().mul_(qs)).to(torch.int8).reshape(K, -1)
++                if NPH == 1:
++                    Dq = torch.round(Dm.float().mul_(qs)).to(torch.int8).reshape(K, -1)
++                else:   # plane by plane (a full fp32 copy of 4K planes would double the peak memory)
++                    Dq = torch.empty((K * NPH, HD * WD), dtype=torch.int8, device=dev)
++                    for k_ in range(K * NPH):
++                        Dq[k_] = torch.round(Dm[k_].float().mul_(qs)).to(torch.int8).reshape(-1)
+                 qn = norm / qs
+             else:
+-                Dq = Dm.reshape(K, -1); qn = norm
++                Dq = Dm.reshape(K * NPH, -1); qn = norm
+             del Dm; Dm = None
+             L = Hc * WD
+             best = torch.full((L,), -127 if use8 else -1e4, dtype=Dq.dtype, device=dev)
+             acc = torch.empty((L,), dtype=Dq.dtype, device=dev)
+-            SX = np.round(np.outer(VX, dts_c)).astype(np.int64)      # (nh, K)
+-            SY = np.round(np.outer(VY, dts_c)).astype(np.int64)
++            if NPH == 1:
++                SX = np.round(np.outer(VX, dts_c)).astype(np.int64)      # (nh, K)
++                SY = np.round(np.outer(VY, dts_c)).astype(np.int64)
++                ROW = None
++            else:   # half-cell rounding: plane (hx%2, hy%2), integer shift (hx//2, hy//2) (floor semantics)
++                HX = np.round(2 * np.outer(VX, dts_c)).astype(np.int64)
++                HY = np.round(2 * np.outer(VY, dts_c)).astype(np.int64)
++                SX, SY = HX // 2, HY // 2
++                ROW = np.arange(K, dtype=np.int64)[None] * NPH + (HY % 2) * 2 + (HX % 2)   # (nh, K) plane row of Dq
++                del HX, HY
+             OFF = (P + SY) * WD + (P + SX)
+             t_c0 = time.time()
+             nh = 0
+@@ -341,8 +380,9 @@
+                         hs = np.nonzero(bid == b_)[0]
+                         OFFb = OFF[hs]
+                         cnt = [0]
+-                        pa, ia = _build(torch, Dq, OFFb, SA, dts_c, L, cnt)
+-                        pb, ib = _build(torch, Dq, OFFb, SB, dts_c, L, cnt)
++                        ROWb = ROW[hs] if ROW is not None else None
++                        pa, ia = _build(torch, Dq, OFFb, SA, dts_c, L, cnt, ROWb)
++                        pb, ib = _build(torch, Dq, OFFb, SB, dts_c, L, cnt, ROWb)
+                         for j_, h in enumerate(hs):
+                             ta, ba = pa[ia[j_]]; tb, bb = pb[ib[j_]]
+                             oa = int(OFFb[j_, SA[0]]) - ba; ob = int(OFFb[j_, SB[0]]) - bb
+@@ -370,12 +410,13 @@
+                     if (h & 63) == 0 and time.time() - T0 > deadline:
+                         break
+                     of_ = OFF[h]
++                    rw_ = ROW[h] if ROW is not None else range(K)
+                     if K == 1:
+-                        acc.copy_(Dq[0, of_[0]:of_[0] + L])
++                        acc.copy_(Dq[rw_[0], of_[0]:of_[0] + L])
+                     else:
+-                        torch.add(Dq[0, of_[0]:of_[0] + L], Dq[1, of_[1]:of_[1] + L], out=acc)
++                        torch.add(Dq[rw_[0], of_[0]:of_[0] + L], Dq[rw_[1], of_[1]:of_[1] + L], out=acc)
+                         for k_ in range(2, K):
+-                            acc.add_(Dq[k_, of_[k_]:of_[k_] + L])
++                            acc.add_(Dq[rw_[k_], of_[k_]:of_[k_] + L])
+                     torch.maximum(best, acc, out=best)
+                     nh += 1
+                 done_idx = np.arange(nh)
+@@ -407,15 +448,22 @@
+                 pf_ = (yy * WD + xx).to(torch.int64)
+                 bv_ = torch.full((len(sc),), -1e9, device=dev); bi_ = torch.zeros(len(sc), dtype=torch.int64, device=dev)
+                 OFF_t = torch.tensor(OFF[done_idx], dtype=torch.int64, device=dev)
++                if ROW is not None:   # flat index into the (K*NPH, NT) plane stack
++                    OFF_t += torch.tensor(ROW[done_idx], dtype=torch.int64, device=dev) * Dq.shape[1]
++                    Dqf_ = Dq.reshape(-1)
+                 for h0 in range(0, nh, 256):
+                     v_ = torch.zeros((min(256, nh - h0), len(sc)), device=dev)
+                     for k_ in range(K):
+-                        v_ += Dq[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
++                        if ROW is not None:
++                            v_ += Dqf_[OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
++                        else:
++                            v_ += Dq[k_][OFF_t[h0:h0 + 256, k_][:, None] + pf_[None]].float()
+                     m_, a_ = v_.max(0)
+                     bt_ = m_ > bv_
+                     bv_ = torch.where(bt_, m_, bv_); bi_ = torch.where(bt_, a_ + h0, bi_)
+                 hh = done_idx[bi_.cpu().numpy()]
+                 del OFF_t
++                Dqf_ = None
+             yy, xx, sc = yy.cpu().numpy(), xx.cpu().numpy(), sc.cpu().numpy()
+             fi = fi0 + len(frames_out)
+             rres = None
+@@ -423,7 +471,7 @@
+             if Dm3 is not None and len(sc):
+                 try:
+                     rres = _rescore(torch, dev, Dm3, xx.astype(float), yy.astype(float), VX[hh], VY[hh], dts_c, P, WD, HD,
+-                                    norm, dv, RSUB)
++                                    norm, dv, RSUB, NPH)
+                 except Exception as ex:
+                     log("fstk rescore failed:", repr(ex)[:200]); rres = None
+             if rres is not None:
+@@ -506,18 +554,23 @@
+                                 for ex in (-1, 0, 1):
+                                     a_ = 0.0
+                                     for k_ in range(K):
+-                                        sxx = int(round(vx_ * dts_c[k_])); syy = int(round(vy_ * dts_c[k_]))
+-                                        a_ += float(Dq[k_, (P + syy + yi + ey) * WD + P + sxx + xi + ex])
++                                        if NPH == 1:
++                                            sxx = int(round(vx_ * dts_c[k_])); syy = int(round(vy_ * dts_c[k_]))
++                                            a_ += float(Dq[k_, (P + syy + yi + ey) * WD + P + sxx + xi + ex])
++                                        else:
++                                            hx_ = int(np.round(2 * vx_ * dts_c[k_])); hy_ = int(np.round(2 * vy_ * dts_c[k_]))
++                                            a_ += float(Dq[k_ * NPH + (hy_ % 2) * 2 + hx_ % 2,
++                                                           (P + hy_ // 2 + yi + ey) * WD + P + hx_ // 2 + xi + ex])
+                                     if a_ * qn > bestv:
+                                         bestv = a_ * qn; bh_ = (xi + ex, yi + ey, vx_, vy_)
+                     rsv = ""
+                     if Dm3 is not None and bh_ is not None:
+                         try:
+                             r_ = _rescore(torch, dev, Dm3, np.array([bh_[0]], float), np.array([bh_[1]], float),
+-                                          np.array([bh_[2]]), np.array([bh_[3]]), dts_c, P, WD, HD, norm, dv, RSUB)
++                                          np.array([bh_[2]]), np.array([bh_[3]]), dts_c, P, WD, HD, norm, dv, RSUB, NPH)
+                             # also a continuous-truth evaluation (true sub-px position & velocity, no search)
+                             r1_ = _rescore(torch, dev, Dm3, np.array([ppx / SP + (WD - 1) / 2 - P]), np.array([ppy / SP + (HD - 1) / 2 - P]),
+-                                           np.array([pvx]), np.array([pvy]), dts_c, P, WD, HD, norm, dv, 0)
++                                           np.array([pvx]), np.array([pvy]), dts_c, P, WD, HD, norm, dv, 0, NPH)
+                             if rres is not None:
+                                 rk2 = int((s2sorted > r_[0][0]).sum())
+                                 dd_ = np.hypot(kx_ - bh_[0], ky_ - bh_[1])
+@@ -554,6 +607,12 @@
+                     torch.cuda.empty_cache()
+             except Exception:
+                 pass
++            if HALF:   # gen 129 arm D: retry this slice (and the rest) on the 1-plane path
++                HALF = False
++                log("fstk half: disabled after the failure, retrying the slice on the 1-plane path")
++                Dq = Dqf_ = None
++                di -= 1
++                continue
+             nfail += 1
+             if nfail >= 3:
+                 break
+@@ -575,15 +634,19 @@
+     return S[:bst[1]], S[bst[1]:]
+ 
+ 
+-def _build(torch, Dq, OFFb, S, tc, L, cnt):
++def _build(torch, Dq, OFFb, S, tc, L, cnt, ROWb=None):
+     """gen 128: partial sums of co-add subset S for the block's hypotheses OFFb (nb, K).  Returns (parts, inv):
+     parts[u] = (tensor, base) with tensor[j - base] = sum_{k in S} Dq[k][j + OFF[h,k] - OFF[h,S0]] for every hypothesis
+     h with inv[h] == u, valid for j in [min_h OFF[h,S0], max_h OFF[h,S0] + L)."""
+     if len(S) == 1:
+-        return [(Dq[S[0]], 0)], np.zeros(len(OFFb), np.int64)
++        if ROWb is None:
++            return [(Dq[S[0]], 0)], np.zeros(len(OFFb), np.int64)
++        # gen 129 arm D: leaf identity = (co-add, phase plane)
++        ur, inv = np.unique(ROWb[:, S[0]], return_inverse=True)
++        return [(Dq[int(r)], 0) for r in ur], np.asarray(inv).ravel().astype(np.int64)
+     A, B = _split(S, tc)
+-    pa, ia = _build(torch, Dq, OFFb, A, tc, L, cnt)
+-    pb, ib = _build(torch, Dq, OFFb, B, tc, L, cnt)
++    pa, ia = _build(torch, Dq, OFFb, A, tc, L, cnt, ROWb)
++    pb, ib = _build(torch, Dq, OFFb, B, tc, L, cnt, ROWb)
+     o0 = OFFb[:, S[0]]; dl = OFFb[:, B[0]] - o0
+     uq, inv = np.unique(np.stack([ia, ib, dl], 1), axis=0, return_inverse=True)
+     inv = np.asarray(inv).ravel()
+@@ -600,11 +663,11 @@
+     return parts, inv
+ 
+ 
+-def _rescore(torch, dev, Dm3, xx, yy, vx, vy, dts_c, P, WD, HD, norm, dv, RSUB):
++def _rescore(torch, dev, Dm3, xx, yy, vx, vy, dts_c, P, WD, HD, norm, dv, RSUB, NPH=1):
+     """gen 109 (arm H): for each peak (kernel coords xx, yy; velocity vx, vy in px/day), the best stack over a local grid
+     of position offsets (+-0.5 px) and velocity offsets (+-0.5 dv), steps 0.5/RSUB (RSUB 0: the exact point only); the
+     track is continuous and rounded per co-add.  Returns (best, ex, ey, evx, evy, exact) as numpy arrays."""
+-    K = Dm3.shape[0]
++    K = Dm3.shape[0] // NPH
+     n = len(xx)
+     if RSUB > 0:
+         g = np.arange(-RSUB, RSUB + 1) * (0.5 / RSUB)
+@@ -613,7 +676,7 @@
+     EX, EY, EVX, EVY = [a.ravel() for a in np.meshgrid(g, g, g * dv, g * dv, indexing="ij")]
+     G = len(EX)
+     i0 = int(np.argmin(np.abs(EX) + np.abs(EY) + np.abs(EVX) + np.abs(EVY)))
+-    flat = Dm3.reshape(K, -1)
++    flat = Dm3.reshape(K * NPH, -1)
+     NT = flat.shape[1]
+     xx_t = torch.tensor(np.asarray(xx, np.float32), device=dev)[:, None]
+     yy_t = torch.tensor(np.asarray(yy, np.float32), device=dev)[:, None]
+@@ -628,11 +691,20 @@
+         acc = torch.zeros((sl.stop - sl.start, G), device=dev)
+         for k in range(K):
+             dt = float(dts_c[k])
+-            col = torch.floor(xx_t[sl] + EX_t + P + (vx_t[sl] + EVX_t) * dt + 0.5)
+-            row = torch.floor(yy_t[sl] + EY_t + P + (vy_t[sl] + EVY_t) * dt + 0.5)
+-            col = col.clamp(0, WD - 1); row = row.clamp(0, HD - 1)
+-            idx = (row * WD + col).to(torch.int64).clamp_(0, NT - 1)
+-            acc += flat[k][idx].float()
++            if NPH == 1:
++                col = torch.floor(xx_t[sl] + EX_t + P + (vx_t[sl] + EVX_t) * dt + 0.5)
++                row = torch.floor(yy_t[sl] + EY_t + P + (vy_t[sl] + EVY_t) * dt + 0.5)
++                col = col.clamp(0, WD - 1); row = row.clamp(0, HD - 1)
++                idx = (row * WD + col).to(torch.int64).clamp_(0, NT - 1)
++                acc += flat[k][idx].float()
++            else:   # gen 129 arm D: round to half cells, plane (hx%2, hy%2) at (hx//2, hy//2)
++                hx = torch.floor(2 * (xx_t[sl] + EX_t + P + (vx_t[sl] + EVX_t) * dt) + 0.5)
++                hy = torch.floor(2 * (yy_t[sl] + EY_t + P + (vy_t[sl] + EVY_t) * dt) + 0.5)
++                col = torch.floor(hx * 0.5); row = torch.floor(hy * 0.5)
++                pl = k * NPH + (hy - 2 * row) * 2 + (hx - 2 * col)
++                col = col.clamp(0, WD - 1); row = row.clamp(0, HD - 1)
++                idx = (pl.to(torch.int64) * NT + row.to(torch.int64) * WD + col.to(torch.int64)).clamp_(0, NPH * K * NT - 1)
++                acc += flat.reshape(-1)[idx].float()
+         acc *= norm
+         m_, a_ = acc.max(1)
+         best[sl] = m_.cpu().numpy(); arg[sl] = a_.cpu().numpy(); exact[sl] = acc[:, i0].cpu().numpy()

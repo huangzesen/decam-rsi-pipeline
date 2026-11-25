@@ -1,0 +1,1 @@
+Run one DECam region from this directory with `python3 finder.py --scen DIR --out OUT --budget-s 1800`. The finder writes ranked detection-row linkages to `OUT/candidates.json`. The method and local validation results are in `NOTES.md`.

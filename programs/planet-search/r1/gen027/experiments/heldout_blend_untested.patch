@@ -1,0 +1,113 @@
+diff -ru -x __pycache__ workspace/submission/stackd/finder.py tmp/s_blend/stackd/finder.py
+--- workspace/submission/stackd/finder.py	2026-11-02 05:49:32
++++ tmp/s_blend/stackd/finder.py	2026-11-02 16:56:19
+@@ -708,7 +708,9 @@
+     K = 384 if cuda else 192
+     refined, rsc, rng_ = [], [], []
+     order_ = np.argsort(-seed_sc)
+-    ref_deadline = budget * 0.95
++    HOMODE = os.environ.get("TNO_HELDOUT", "blend")      # gen027: "blend" = sqrt(p_orig*p_ho); "1" = replace (gen026); "0" = gen025
++    HELDOUT = HOMODE != "0"
++    ref_deadline = budget * (float(os.environ.get("TNO_HOREF", "0.80")) if HELDOUT else 0.95)
+     for jj, j in enumerate(order_):
+         if time.time() - T0 > ref_deadline:
+             break
+@@ -745,6 +747,98 @@
+         cands = dedup(cands, score_states, t_ep)
+         write_out(a.out, cands)
+         log(f"seed-score median {np.median(rsc):.2f}, max {np.max(rsc):.2f}; refined {len(refined)}; output {len(cands)}; top p {[round(c['p'], 3) for c in sorted(cands, key=lambda c: -c['p'])[:8]]}")
++
++    def heldout_rerank(cands):
++        """gen 26: leave-one-night-out.  For each candidate and each night n, re-fit the state (short CEM around the
++        refined state) on all OTHER nights' frames, then measure night n's stacked S/N at the re-fitted state.  The
++        p is rebuilt from the held-out evidence only (number of held-out nights with S/N >= HOSN and the combined
++        held-out S/N), so noise that the 5-parameter best-of fitted to a few frames gets no credit."""
++        t1 = time.time()
++        nn = len(nights_idx)
++        K2 = int(os.environ.get("TNO_HOK", "64"))
++        NIT = int(os.environ.get("TNO_HOIT", "3"))
++        HOSN = float(os.environ.get("TNO_HOSN", "2.0"))
++        hdl = budget * 0.97
++        M = np.zeros((nn, N))
++        for k, idx in enumerate(nights_idx):
++            M[k, idx] = 1.0
++        keepm = 1.0 - M                                   # (nn,N) frames used for the fit when night k is held out
++        res_ = []
++        for ci, cd in enumerate(cands):
++            if time.time() - T0 > hdl:
++                break
++            s = np.array(cd["state"], float)
++            r = np.linalg.norm(s[:3])
++            TL = tframe(s[:3])
++            sig0 = np.array([1.5 * ARCR * r, 1.5 * ARCR * r, 0.6 * dv * SP * r, 0.6 * dv * SP * r, 0.03 * r]) * 0.4
++            mu = np.zeros((nn, 5)); sig = np.repeat(sig0[None], nn, 0)
++            bestS = np.repeat(s[None], nn, 0); bestv = np.full(nn, -1e9)
++            for itn in range(NIT):
++                Z = mu[:, None] + rng.standard_normal((nn, K2, 5)) * sig[:, None]
++                Z[:, 0] = mu
++                if itn == 0:
++                    Z[:, 0] = 0
++                Zf = Z.reshape(-1, 5)
++                S = np.repeat(s[None], len(Zf), 0)
++                S[:, :3] += Zf[:, 0:1] * TL[0] + Zf[:, 1:2] * TL[1]
++                los = S[:, :3] - oref; losn = los / np.linalg.norm(los, axis=1)[:, None]
++                S[:, :3] += Zf[:, 4:5] * losn
++                S[:, 3:] += Zf[:, 2:3] * TL[0] + Zf[:, 3:4] * TL[1]
++                v, c = score_states(S)
++                v = v.reshape(nn, K2, N); c = c.reshape(nn, K2, N)
++                km = keepm[:, None, :]
++                tot = (v * wf[None, None] * km).sum(2) / np.sqrt(np.maximum((c * wf2[None, None] * km).sum(2), 1e-3))
++                Sr = S.reshape(nn, K2, 6)
++                for k in range(nn):
++                    el = np.argsort(-tot[k])[:max(4, K2 // 8)]
++                    if tot[k, el[0]] > bestv[k]:
++                        bestv[k] = tot[k, el[0]]; bestS[k] = Sr[k, el[0]]
++                    mu[k] = Z[k, el].mean(0); sig[k] = np.maximum(Z[k, el].std(0), sig0 * 0.3)
++            v, c = score_states(bestS)                         # (nn,N): row k = state fitted without night k
++            num = (v * wf[None] * M).sum(1); den = (c * wf2[None] * M).sum(1)
++            cov_ = den > 1e-6
++            hsn = np.where(cov_, num / np.sqrt(np.maximum(den, 1e-6)), 0.0)
++            ncov = int(cov_.sum())
++            # all nights in the denominator: an uncovered held-out night counts as 0 evidence (candidates seen on
++            # only 3 of 6 nights were mostly noise; offline on the gen026 INJ run: 9 vs 6 A in the top 25)
++            comb = float(hsn[cov_].sum() / math.sqrt(nn))
++            ngood = int((hsn[cov_] >= HOSN).sum())
++            res_.append((ci, comb, ngood, ncov, hsn))
++        if not res_:
++            return
++        combs = np.array([x[1] for x in res_])
++        med = np.median(combs); mad = 1.4826 * np.median(np.abs(combs - med)) + 1e-3
++        for ci, comb, ngood, ncov, hsn in res_:
++            z = (comb - med) / mad
++            p = 1 / (1 + math.exp(-(z - 4.0) / 0.8))
++            p = float(min(max(p, 2e-4), 0.999))
++            if HOMODE == "blend":
++                p = float(min(max(math.sqrt(max(cands[ci]["p"], 1e-6) * p), 2e-4), 0.999))
++            cands[ci]["p"] = p
++            cands[ci]["_ho"] = (round(comb, 2), ngood, ncov)
++        if HOMODE == "blend":
++            for c_ in cands[len(res_):]:                     # gen027 blend: not evaluated -> p_orig * 0.5
++                c_["p"] = float(max(1e-4, c_["p"] * 0.5))
++        else:
++            lo = min(c_["p"] for c_ in cands[:len(res_)])
++            for c_ in cands[len(res_):]:                     # not evaluated: below every evaluated one
++                c_["p"] = float(max(1e-4, min(c_["p"], lo) * 0.5))
++        cands.sort(key=lambda c_: -c_["p"])
++        log(f"heldout: {len(res_)}/{len(cands)} evaluated in {time.time() - t1:.0f}s, comb median {med:.2f} mad {mad:.2f}; "
++            f"top {[(round(c_['p'], 3), c_.get('_ho')) for c_ in cands[:12]]}")
++        if os.environ.get("TNO_HODUMP"):
++            json.dump([[c_["state"], c_.get("_ho")] for c_ in cands], open(os.environ["TNO_HODUMP"], "w"))
++        for c_ in cands:
++            c_.pop("_ho", None)
++        write_out(a.out, cands)
++
++    if refined and HELDOUT and cands:
++        try:
++            heldout_rerank(cands)
++        except Exception as ex:
++            import traceback
++            traceback.print_exc()
++            log("heldout failed:", ex)
+ 
+ 
+ BAND_F = {"g": 0.8, "r": 1.0, "i": 1.0, "z": 0.8, "Y": 0.5, "VR": 1.15}

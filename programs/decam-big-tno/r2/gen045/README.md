@@ -1,0 +1,1 @@
+Run `python3 finder.py --scen DIR --out OUT --budget-s 1800` to search one DECam region. The finder writes ranked original-catalogue row associations to `OUT/candidates.json`. See `NOTES.md` for the method and validation measurements.

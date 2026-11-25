@@ -1,0 +1,105 @@
+diff -ru -x experiments -x __pycache__ -x *.pyc -x dump -x offline -x out.json -x pid -x run.log workspace/submission/stackd/finder.py tmp/armB/stackd/finder.py
+--- workspace/submission/stackd/finder.py	2026-11-05 06:01:44
++++ tmp/armB/stackd/finder.py	2026-11-05 10:40:58
+@@ -2221,6 +2221,44 @@
+     return keep
+ 
+ 
++def chi_stats(v, c, wf, nights_idx):
++    """gen 89 (TNO_RANKX_CHI): per-exposure consistency of a track.  Model z_i = F * wf_i (wf = expected S/N of a
++    fixed-magnitude source per exposure); F fitted by weighted least squares over covered exposures.
++    Returns (b, X): b = weighted stack S/N with the single largest-contributing NIGHT dropped (robust significance);
++    X = (chi2 - dof) / sqrt(2 dof) of residuals v_i - F wf_i (excess scatter, ~N(0,1) for consistent tracks)."""
++    v = np.where(c, v, 0.0).astype(np.float64)
++    cw = c.astype(np.float64)
++    num = v * wf[None]; den = cw * (wf ** 2)[None]
++    Nt = num.sum(1); Dt = den.sum(1)
++    F = Nt / np.maximum(Dt, 1e-6)
++    r = (v - F[:, None] * wf[None]) * cw
++    n = cw.sum(1)
++    dof = np.maximum(n - 1, 1)
++    X = ((r ** 2).sum(1) - dof) / np.sqrt(2 * dof)
++    nk = np.stack([num[:, idx].sum(1) for idx in nights_idx], 1)
++    dk = np.stack([den[:, idx].sum(1) for idx in nights_idx], 1)
++    kb = np.argmax(nk, 1); ar = np.arange(len(v))
++    b = (Nt - nk[ar, kb]) / np.sqrt(np.maximum(Dt - dk[ar, kb], 1e-3))
++    ncov = (dk > 0).sum(1)
++    b = np.where(ncov >= 3, b, -9.0)
++    X = np.where(n >= 3, X, 0.0)
++    return b, X
++
++
++def mednight_stat(v, c, wf, nights_idx):
++    """gen 89 (TNO_RANKX_CHI mode 'mednight'): robust per-night consistency.  Per covered night k the depth-weighted
++    flux F_k = sum(v w) / sum(w^2); the statistic is MEDIAN_k(F_k) * sqrt(sum over all covered exposures of w^2), i.e.
++    the all-exposure stack S/N a body with the median night's flux would have.  One or two bright nights (cosmic,
++    artefact, local noise excursion) cannot raise it; a real body (flux on every night) keeps ~its full stack S/N."""
++    v = np.where(c, v, 0.0).astype(np.float64)
++    num = v * wf[None]; den = c * (wf ** 2)[None]
++    Fk = np.stack([np.where(den[:, i].sum(1) > 0, num[:, i].sum(1) / np.maximum(den[:, i].sum(1), 1e-6), np.nan)
++                   for i in nights_idx], 1)
++    ncov = np.isfinite(Fk).sum(1)
++    med = np.array([np.median(r[np.isfinite(r)]) if np.isfinite(r).any() else 0.0 for r in Fk])
++    return np.where(ncov >= 3, med * np.sqrt(den.sum(1)), -9.0)
++
++
+ RX2_W, RX2_MODE = "0.75", "min"   # gen 83 TNO_RANKX2 defaults (paired inj7 dumps: top-25 hits 4 -> 5)
+ 
+ 
+@@ -2316,6 +2354,44 @@
+                    for j, c in enumerate(cands)])
+     key = W_ * zx + (1 - W_) * zp
+     pv = sorted([float(c["p"]) for c in cands], reverse=True)
++    # gen 89 (TNO_RANKX_CHI, default on; 0 = gen085): replace the lono z by a robust drop-best-night stack z minus a
++    # null-calibrated excess-chi2 penalty (per-exposure residuals vs a single depth-weighted flux).
++    CHI = os.environ.get("TNO_RANKX_CHI", "1") != "0"
++    chi_d = None
++    if CHI or dump is not None:
++        try:
++            t_c = time.time()
++            vN, cN = score_states(nul)
++            bN, XN = chi_stats(vN, cN, wf, nights_idx)
++            bC, XC = chi_stats(v0, c0, wf, nights_idx)
++            mb, sb = np.median(bN), 1.4826 * np.median(np.abs(bN - np.median(bN))) + 1e-3
++            mX, sX = np.median(XN), 1.4826 * np.median(np.abs(XN - np.median(XN))) + 1e-3
++            zb = (bC - mb) / sb
++            pen = np.maximum(0.0, (XC - mX) / sX)
++            mN, mC = mednight_stat(vN, cN, wf, nights_idx), mednight_stat(v0, c0, wf, nights_idx)
++            zm = (mC - np.median(mN)) / (1.4826 * np.median(np.abs(mN - np.median(mN))) + 1e-3)
++            chi_d = dict(zb=zb, pen=pen, XC=XC, zm=zm)
++            if dump is not None:
++                try:
++                    np.savez_compressed(os.path.join(os.environ.get("TNO_RANKX_DUMP", "."), "chi_feats.npz"),
++                                        vC=v0.astype(np.float32), cC=c0, vN=vN.astype(np.float32), cN=cN, wf=wf,
++                                        nights=np.array([np.asarray(i) for i in nights_idx], dtype=object),
++                                        zx=zx, zp=zp, pv=np.array(pv), states=Sc, p=np.array([c["p"] for c in cands]))
++                except Exception as ex:
++                    log_("rankx chi: feature dump failed:", repr(ex)[:200])
++            if CHI:
++                CW = float(os.environ.get("TNO_RANKX_CHI_W", "0.75"))
++                CM = os.environ.get("TNO_RANKX_CHI_MODE", "mednight")
++                st_ = {"mednight": zm, "chi": zb - pen, "dropb": zb}.get(CM, zm)
++                key = CW * st_ + (1 - CW) * zp
++                ntop = np.argsort(-key, kind="stable")[:25]
++                log_(f"rankx chi: ON mode {CM} W {CW:.2f}; null b median {mb:.2f} MAD {sb:.2f}, null X median {mX:.2f} MAD {sX:.2f}; "
++                     f"top-25 mean pen {float(pen[ntop].mean()):.2f}, {int((pen > 2).sum())} of {len(pen)} pen>2; {time.time() - t_c:.2f}s")
++        except Exception as ex:
++            import traceback
++            traceback.print_exc()
++            log_("rankx chi failed:", repr(ex)[:300])
++            chi_d = None
+     if dump is not None:   # gen 83 diagnostics (TNO_RANKX_DUMP): every variant's reorder, same p values, same rule
+         zxs = {"min": zx} if MODE_ == "min" else {}
+         for md_ in ("min", "med", "dropn"):
+@@ -2326,6 +2402,11 @@
+         for nm_v, md_, w_ in vars_:
+             kv_ = w_ * zxs[md_] + (1 - w_) * zp
+             dump(nm_v, [dict(cands[j], p=pv[k]) for k, j in enumerate(np.argsort(-kv_, kind="stable"))])
++        if chi_d is not None:
++            for w_ in (0.5, 0.75, 1.0):
++                for nm_c, st_c in (("chi", chi_d["zb"] - chi_d["pen"]), ("chib", chi_d["zb"]), ("chilono", zxs["min"] - chi_d["pen"]), ("mednight", chi_d["zm"])):
++                    kv_ = w_ * st_c + (1 - w_) * zp
++                    dump(f"{nm_c}_w{w_:.2f}", [dict(cands[j], p=pv[k]) for k, j in enumerate(np.argsort(-kv_, kind="stable"))])
+     old = [int(j) for j in np.argsort([-c["p"] for c in cands], kind="stable")]
+     new = [int(j) for j in np.argsort(-key, kind="stable")]
+     out = [dict(cands[j], p=pv[k]) for k, j in enumerate(new)]

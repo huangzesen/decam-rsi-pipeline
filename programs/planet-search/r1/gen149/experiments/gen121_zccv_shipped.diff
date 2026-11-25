@@ -1,0 +1,80 @@
+--- tmp/base_src/stackd/finder.py	2026-11-07 11:26:31
++++ workspace/submission/stackd/finder.py	2026-11-07 11:40:52
+@@ -2990,6 +2990,13 @@
+     KC = int(os.environ.get("TNO_CV_K", "128")); IT = int(os.environ.get("TNO_CV_IT", "5"))
+     W_ = float(os.environ.get("TNO_CV_A", "0.7"))
+     dl = budget * float(os.environ.get("TNO_CV_DL", "0.965"))
++    # gen 121 (TNO_ZCCV, default 1; 0 = gen120): rankx ranks fstk (kind-3) tracks by max(blend, zc), where zc is an
++    # IN-SAMPLE clipped-stack z, so the held-out cv here never reaches them.  Also measure the held-out clipped stack
++    # and, when it clearly fails (zq < ZCCV_T), pull zc towards it (zc' = min(zc, W zq + (1 - W) zc)).  Order only.
++    RCQ = float(os.environ.get("TNO_RCLIP", "3.0") or 0)
++    ZCCV = os.environ.get("TNO_ZCCV", "1") != "0" and RCQ > 0
++    ZCCV_T = float(os.environ.get("TNO_ZCCV_T", "3.0"))
++    ZCCV_W = float(os.environ.get("TNO_ZCCV_W", "0.7"))
+ 
+     def cvs(S):
+         out = []
+@@ -2999,7 +3006,12 @@
+             v, c = score_states(np.array([sA, sB]))
+             vb = (v[0] * mB, c[0] & mB); va = (v[1] * mA, c[1] & mA)
+             zb = total(vb[0][None], vb[1][None])[0]; za = total(va[0][None], va[1][None])[0]
+-            out.append((za + zb) / math.sqrt(2))
++            if ZCCV:   # gen 121: held-out CLIPPED stack (same clip as to_cands' zc), so fstk tracks get a held-out zc
++                zbq = total((np.minimum(v[0], RCQ) * mB)[None], (c[0] & mB)[None])[0]
++                zaq = total((np.minimum(v[1], RCQ) * mA)[None], (c[1] & mA)[None])[0]
++                out.append(((za + zb) / math.sqrt(2), (zaq + zbq) / math.sqrt(2)))
++            else:
++                out.append(((za + zb) / math.sqrt(2), np.nan))
+         return np.array(out)
+ 
+     t0 = time.time()
+@@ -3011,11 +3023,12 @@
+     vt, ct = score_states(np.concatenate([nul, Sc]) if len(Sc) else nul)
+     tot_all = total(vt, ct)
+     tn, tc = tot_all[:len(nul)], tot_all[len(nul):]
+-    cvn = []
++    cvn, cvqn, cvq = [], [], {}
+     for s in nul:
+         if time.time() - T0 > dl:
+             break
+-        cvn.append(cvs([s])[0])
++        r_ = cvs([s])[0]
++        cvn.append(r_[0]); cvqn.append(r_[1])
+     if len(cvn) < 20:
+         log_(f"cv rerank: only {len(cvn)} null evaluations; skipped")
+         return cands
+@@ -3029,7 +3042,8 @@
+         if time.time() - T0 > dl:
+             break
+         zt = (tc[j] - mt) / st
+-        cv = cvs([Sc[j]])[0]
++        r_ = cvs([Sc[j]])[0]
++        cv = r_[0]; cvq[j] = r_[1]
+         zs[j] = W_ * (cv - mn) / sn + (1 - W_) * zt
+         done += 1
+     if done < 2:
+@@ -3042,6 +3056,24 @@
+     pv = sorted([float(cands[j]["p"]) for j in E], reverse=True)
+     Enew = sorted(E, key=lambda j: -zs[j])
+     out = [dict(cands[j], p=pv[k]) for k, j in enumerate(Enew)] + [cands[j] for j in order[done:]]
++    if ZCCV:
++        try:
++            q_ = np.array(cvqn, float); q_ = q_[np.isfinite(q_)]
++            mq = float(np.median(q_)); sq = 1.4826 * float(np.median(np.abs(q_ - mq))) + 1e-3
++            nev = ndem = 0; drops = []
++            for k, j in enumerate(Enew):
++                o = out[k]
++                if "zc" in o and np.isfinite(o["zc"]) and np.isfinite(cvq.get(j, np.nan)):
++                    zq = (cvq[j] - mq) / sq
++                    nev += 1
++                    o["zq"] = float(zq); o["zc0"] = float(o["zc"])
++                    if zq < ZCCV_T:
++                        nz = float(min(o["zc"], ZCCV_W * zq + (1 - ZCCV_W) * o["zc"]))
++                        drops.append(o["zc"] - nz); o["zc"] = nz; ndem += 1
++            log_(f"zccv: held-out clipped null median {mq:.2f} MAD {sq:.2f} (n {len(q_)}); {nev} kind-3 evaluated, "
++                 f"{ndem} demoted (median zc drop {np.median(drops) if drops else 0:.2f})")
++        except Exception as ex:
++            log_("zccv failed:", repr(ex)[:200])
+     if zout is not None:                  # gen 82 (TNO_RANKX): hand the blended cv z to rankx, keyed by output dict id
+         for k, j in enumerate(Enew):
+             zout[id(out[k])] = float(zs[j])
