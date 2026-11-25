@@ -1,6 +1,6 @@
 # DECam RSI pipeline: AI agents write the search, the archive pipeline runs it, every lead is vetted
 
-**Status: private snapshot of the code as it ran (2026-11-24). Paths, logins, accounts, hosts and private pages are replaced by placeholders, listed in [CONFIG.md](CONFIG.md); sites are described in [NODES.md](NODES.md).**
+**Status: snapshot of the code as it ran (2026-11-24). Paths, logins, accounts, hosts and private pages are replaced by placeholders, listed in [CONFIG.md](CONFIG.md); sites are described in [NODES.md](NODES.md).**
 Nothing was refactored for this snapshot. It is meant to be read, not run: the code needs our clusters, logins, storage
 and data, none of which are here.
 

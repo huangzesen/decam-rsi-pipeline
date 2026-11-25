@@ -1,4 +1,4 @@
-# Registry of the nodes of the DECam RSI pipeline, as it ran (private snapshot, 2026-11-24).
+# Registry of the nodes of the DECam RSI pipeline, as it ran (snapshot, 2026-11-24).
 # Paths under implementation are relative to nodes/. hardcoded: counts of occurrences in the node's code, with examples
 # (measured by a scan of the copied files). Every node runs only where its site says; nothing here is portable yet.
 version: 1
